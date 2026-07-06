@@ -2,7 +2,7 @@
 
 BepInEx mods for [Project Hardline](https://store.steampowered.com/), built with Harmony.
 
-These are unofficial, fan-made mods and are not affiliated with, endorsed by, or supported by the developers/publisher of Project Hardline.
+These are unofficial, fan-made mods and are not affiliated with, endorsed by, or supported by the developer/publisher of Project Hardline.
 
 ## Mods
 
