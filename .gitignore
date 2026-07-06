@@ -1,0 +1,6 @@
+# .NET / Visual Studio build output
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo

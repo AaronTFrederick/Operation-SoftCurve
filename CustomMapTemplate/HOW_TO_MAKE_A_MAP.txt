@@ -1,0 +1,148 @@
+================================================================
+  BUILDING YOUR MAP
+================================================================
+
+WHAT YOU CAN USE
+----------------
+
+PRIMITIVES (easiest, always work):
+  Right-click in the Hierarchy → 3D Object → Cube / Plane /
+  Cylinder / Sphere / Capsule
+  These are built-in Unity shapes — they export perfectly.
+  Use Cubes for floors, walls, platforms, ramps (scale + rotate).
+  Use Planes for flat surfaces (no collision on the underside).
+
+IMPORTED 3D MODELS (.fbx or .obj):
+  1. Drag the .fbx or .obj file into the Project panel (Assets/).
+  2. Select the asset in the Project panel.
+  3. In the Inspector, go to the "Model" tab.
+  4. Tick "Read/Write" and click "Apply".
+     (Without this the mesh will be invisible in-game.)
+  5. On the same "Model" tab, tick "Generate Colliders" and
+     click "Apply".
+     (Without this players will fall straight through the mesh.)
+  6. Drag the model from the Project panel into the scene.
+  7. In the Hierarchy, drag it inside MapGeometry so it becomes
+     a child.
+
+  Note: textures embedded in .fbx files are NOT exported — add
+  them via a separate material as described in TEXTURES below.
+
+COLORS:
+  Each object can have its own solid color in-game.
+  To color an object:
+  1. Select it in the Hierarchy.
+  2. In the Project panel, right-click → Create → Material.
+  3. Name the material (e.g. "WallMat").
+  4. In the Inspector, click the Albedo color swatch and pick
+     your color.
+  5. Drag the material from the Project panel onto the object
+     in the scene.
+  The exporter preserves each object's color in the bundle.
+
+  Note: the game uses a flat/unlit look — you'll see the color
+  exactly as you pick it, no shading variation.
+
+TEXTURES:
+  You can put any image (PNG or JPG) on a surface — grass,
+  dirt, concrete, a logo, etc.
+  To texture an object:
+  1. Drag your image file (PNG/JPG) into the Project panel.
+  2. Right-click in the Project panel → Create → Material.
+  3. Name it (e.g. "GrassMat").
+  4. In the Inspector, click the small texture box to the LEFT
+     of the "Albedo" label and pick your image.
+  5. Set the Tiling values (the two numbers next to "Tiling"):
+     - (1, 1) = image appears exactly once on the surface.
+     - (10, 10) = image tiles 10 times — good for grass on a
+       large ground plane so it doesn't look stretched.
+  6. Drag the material onto your object in the scene.
+  The exporter automatically packs the texture into the bundle.
+
+  Note: only the Albedo (base color) texture slot is supported.
+  Normal maps, specular maps, etc. are ignored.
+  Transparency is not supported — keep textures fully opaque.
+
+THINGS THAT DO NOT WORK:
+  - Particle systems, animations
+  - Lights placed in the map (use LightingSetup instead)
+  - Anything that needs a script at runtime
+  - Transparency / alpha in textures
+
+
+================================================================
+  SPECIAL OBJECTS (do not rename these)
+================================================================
+
+T1Spawn_0, T1Spawn_1, ...
+  Where Team 1 (blue) players spawn. Place them on the ground
+  (Y = 1 so players land on the floor). The blue/red sphere
+  gizmo shows each spawn in the scene view.
+  To add more: right-click MapGeometry → Create Empty, rename
+  it T1Spawn_2 (etc.), then add a SpawnMarker component and
+  set Team to 1.
+
+T2Spawn_0, T2Spawn_1, ...
+  Same as above but for Team 2 (red). Set Team to 2 on the
+  SpawnMarker component.
+
+UplinkSpawn
+  The gold pole gizmo. Move this empty object to wherever you
+  want the uplink station to appear in-game. Keep it at ground
+  level (Y = 0).
+  You can add more UplinkSpawn objects (name them UplinkSpawn_1,
+  UplinkSpawn_2, etc.) and the game will randomly pick one each
+  round.
+
+ResupplySpawn_0, ResupplySpawn_1, ...
+  The green box gizmo. Move this empty object to wherever you
+  want an ammo resupply station to appear. Players press F on it
+  to refill their ammo.
+  To add more resupply stations: right-click MapGeometry →
+  Create Empty, name it ResupplySpawn_1 (or _2, _3, etc.),
+  then add a ResupplySpawnMarker component. Each marker places
+  one resupply station in-game.
+
+LightingSetup
+  Select this in the Hierarchy, then use the Inspector to tune:
+  - Sun Color / Intensity / Rotation (angle of sunlight)
+  - Ambient Color (color of shadows / fill light)
+  - Fog (on/off, color, density)
+  Changes preview live in the scene view. Set Sun Rotation X
+  to ~30 for a high sun, ~10 for a low/sunset sun.
+
+================================================================
+  TIPS
+================================================================
+
+- Keep geometry simple. Complex meshes with thousands of
+  polygons will work but may affect performance.
+
+- Make sure the ground is solid (use Cube, not Plane) so
+  players can't fall through from below.
+
+- Spawn points should be INSIDE the map boundary, not too
+  close to walls, and at Y=1 so players land on the floor.
+
+- The UplinkSpawn should be in open ground so the uplink
+  station has room to appear.
+
+- ResupplySpawn markers should be placed somewhere accessible
+  to both teams (or one per side). Keep them on the ground
+  (Y = 0) with some clear space around them.
+
+- For tiled textures (grass, concrete, etc.) a tiling of
+  around 8-16 on a 100-unit ground plane looks natural.
+  For signs or logos use tiling (1, 1) and size the object
+  to match the image's aspect ratio.
+
+- If the map looks too dark in-game, increase the Sun
+  Intensity on LightingSetup, or brighten the Ambient Color.
+
+- Re-export after every change. The old .bundle file is
+  overwritten automatically.
+
+- If something goes wrong during export, check Unity's
+  Console window (Window → General → Console) for red errors.
+
+================================================================
