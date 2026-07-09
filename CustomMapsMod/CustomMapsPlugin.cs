@@ -15,13 +15,13 @@ using System.Reflection;
 
 namespace CustomMapsMod
 {
-    [BepInPlugin("com.peakzelo.custommaps", "Custom Maps", "1.0.0")]
+    [BepInPlugin("com.peakzelo.custommaps", "Custom Maps", "1.0.1")]
     public class CustomMapsPlugin : BaseUnityPlugin
     {
         public static ManualLogSource StaticLogger;
 
         // Bundle filenames (sorted), populated at startup from the CustomMaps/ folder.
-        public static List<string> customMapBundles = new List<string>();
+        public static List<string> customMapBundles = [];
 
         // How many entries the lobby dropdown had BEFORE we added custom maps.
         // Indices >= this value are custom maps.
@@ -53,14 +53,105 @@ namespace CustomMapsMod
 
         // Positions chosen for the resupply stations (AmmoCrate) this round.
         // One entry per ResupplySpawn marker found in the bundle.
-        public static List<Vector3> activeResupplyTargets = new List<Vector3>();
+        public static List<Vector3> activeResupplyTargets = [];
+
+        // ── Runtime-created resources (materials, converted textures) ────────────
+        // These are created with `new Material(...)` / `new Texture2D(...)` at map
+        // load and are NOT owned by the AssetBundle, so Unity never frees them when
+        // the scene unloads. Without explicit cleanup, every custom-map match played
+        // in a session leaks its full set of materials + textures.
+        private static readonly List<UnityEngine.Object> createdResources = [];
+
+        internal static void TrackResource(UnityEngine.Object res)
+        {
+            if (res != null) createdResources.Add(res);
+        }
+
+        private static void DestroyTrackedResources()
+        {
+            if (createdResources.Count == 0) return;
+            foreach (UnityEngine.Object res in createdResources)
+            {
+                if (res != null) UnityEngine.Object.Destroy(res);
+            }
+            StaticLogger.LogInfo($"Custom Maps: Freed {createdResources.Count} runtime resource(s) from previous map.");
+            createdResources.Clear();
+
+            // Bundle-loaded assets (unconverted textures, the MapGeometry prefab)
+            // survive bundle.Unload(false); once nothing references them this
+            // async sweep reclaims that memory too.
+            Resources.UnloadUnusedAssets();
+        }
+
+        // ── Cached spawn positions for GoToSpawnPatch ─────────────────────────────
+        // GoToSpawn fires for every player on every round restart; scanning the
+        // entire map hierarchy (GetComponentsInChildren<Transform>) each time can
+        // hitch on large maps. Positions are static markers, so cache them per map.
+        private static GameObject spawnCacheGeo;      // which mapGeo the cache belongs to
+        private static List<Vector3> cachedT1Spawns = [];
+        private static List<Vector3> cachedT2Spawns = [];
+
+        internal static List<Vector3> GetCachedSpawnPositions(int team)
+        {
+            if (activeMapGeo == null) return null;
+
+            // Rebuild the cache when the active map changes (one scan per map load)
+            if (!ReferenceEquals(spawnCacheGeo, activeMapGeo))
+            {
+                cachedT1Spawns.Clear();
+                cachedT2Spawns.Clear();
+                foreach (Transform t in activeMapGeo.GetComponentsInChildren<Transform>(true))
+                {
+                    if (t.name.StartsWith("T1Spawn", StringComparison.OrdinalIgnoreCase))
+                        cachedT1Spawns.Add(t.position);
+                    else if (t.name.StartsWith("T2Spawn", StringComparison.OrdinalIgnoreCase))
+                        cachedT2Spawns.Add(t.position);
+                }
+                spawnCacheGeo = activeMapGeo;
+                StaticLogger.LogInfo(
+                    $"Custom Maps: Spawn cache built — {cachedT1Spawns.Count} T1, {cachedT2Spawns.Count} T2.");
+            }
+
+            List<Vector3> teamList = team == 2 ? cachedT2Spawns : cachedT1Spawns;
+            if (teamList.Count > 0) return teamList;
+
+            // Fall back to the other team's spawns if this team has none
+            List<Vector3> other = team == 2 ? cachedT1Spawns : cachedT2Spawns;
+            return other.Count > 0 ? other : null;
+        }
+
+        // ── Cached reflection lookups ─────────────────────────────────────────────
+        // GetField / GetProperty walk the type's member tables every call; resolve
+        // them once. (LobbyStartPatch / StartGamePatch already did this.)
+        internal static readonly FieldInfo Team1SpawnsField =
+            typeof(HardlineGameManager).GetField("team1Spawns",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+        internal static readonly FieldInfo Team2SpawnsField =
+            typeof(HardlineGameManager).GetField("team2Spawns",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+        internal static readonly PropertyInfo HumanTeamProperty =
+            typeof(Human).GetProperty("Team", BindingFlags.Public | BindingFlags.Instance);
+
+        // ── Cached UplinkStations root ────────────────────────────────────────────
+        // MoveUplinksToPosition runs every second for 30 s after load plus on every
+        // round; GameObject.Find scans the whole scene each call. Cache the root
+        // (Unity's overloaded == null detects scene-change destruction).
+        private static Transform cachedUplinkStationsRoot;
+
+        internal static Transform GetUplinkStationsRoot()
+        {
+            if (cachedUplinkStationsRoot != null) return cachedUplinkStationsRoot;
+            GameObject go = GameObject.Find("UplinkStations");
+            cachedUplinkStationsRoot = go?.transform;
+            return cachedUplinkStationsRoot;
+        }
 
         private Harmony harmony;
 
         private void Awake()
         {
             StaticLogger = Logger;
-            Logger.LogInfo("Custom Maps v1.0.0");
+            Logger.LogInfo("Custom Maps v1.0.1");
 
             // ── Scan CustomMaps/ folder ───────────────────────────────────────────
             string customMapsDir = Path.Combine(Application.dataPath, "..", "CustomMaps");
@@ -70,13 +161,12 @@ namespace CustomMapsMod
                 Logger.LogInfo("Custom Maps: Created empty CustomMaps/ folder next to the game.");
             }
 
-            customMapBundles = Directory.GetFiles(customMapsDir, "*.bundle")
+            customMapBundles = [.. Directory.GetFiles(customMapsDir, "*.bundle")
                 .Select(f => Path.GetFileName(f))
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)];
 
             Logger.LogInfo($"Custom Maps: Found {customMapBundles.Count} bundle(s):");
-            foreach (var b in customMapBundles)
+            foreach (string b in customMapBundles)
                 Logger.LogInfo($"  {b}");
 
             // ── Register scene-loaded callback (fires on ALL machines) ─────────────
@@ -98,6 +188,15 @@ namespace CustomMapsMod
         {
             // Only care about the main (non-additive) scene change.
             if (mode == LoadSceneMode.Additive) return;
+
+            // The previous scene (and any custom map geometry in it) is gone at this
+            // point, so runtime-created materials/textures from the last custom map
+            // are unreferenced — free them before doing anything else. Safe to run
+            // whether or not the new scene uses a custom map.
+            if (activeMapGeo == null)
+            {
+                DestroyTrackedResources();
+            }
 
             if (string.IsNullOrEmpty(pendingBundle)) return;
 
@@ -143,9 +242,9 @@ namespace CustomMapsMod
             StaticLogger.LogInfo("Custom Maps: MapGeometry instantiated.");
 
             // Debug: verify colliders survived the bundle round-trip.
-            var cols = mapGeo.GetComponentsInChildren<Collider>(true);
+            Collider[] cols = mapGeo.GetComponentsInChildren<Collider>(true);
             StaticLogger.LogInfo($"Custom Maps: MapGeometry has {cols.Length} collider(s).");
-            foreach (var c in cols)
+            foreach (Collider c in cols)
                 StaticLogger.LogInfo($"  {c.gameObject.name}: {c.GetType().Name}  isTrigger={c.isTrigger}  layer={c.gameObject.layer}");
 
             // ── Load per-renderer colour data (cross-platform JSON) ───────────────
@@ -167,68 +266,69 @@ namespace CustomMapsMod
                     : "Custom Maps: No ColorConfig in bundle — falling back to material colours.");
             }
 
-        // ── Load texture config and pre-load all referenced Texture2D assets ──────
-        // Textures must be loaded before bundle.Unload(false) — after that the bundle
-        // data is released but already-loaded assets stay alive in memory.
-        TextureConfigData textureConfig = null;
-        var textureMap = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
-        {
-            TextAsset texAsset = bundle.LoadAsset<TextAsset>("TextureConfig")
-                              ?? bundle.LoadAsset<TextAsset>("assets/_cmexporttemp/textureconfig.json")
-                              ?? bundle.LoadAsset<TextAsset>("textureconfig");
-            if (texAsset != null)
+            // ── Load texture config and pre-load all referenced Texture2D assets ──────
+            // Textures must be loaded before bundle.Unload(false) — after that the bundle
+            // data is released but already-loaded assets stay alive in memory.
+            TextureConfigData textureConfig = null;
+            Dictionary<string, Texture2D> textureMap = new(StringComparer.OrdinalIgnoreCase);
             {
-                StaticLogger.LogInfo($"Custom Maps: TextureConfig asset loaded ({texAsset.text?.Length ?? -1} chars): {texAsset.text?.Substring(0, Mathf.Min(120, texAsset.text?.Length ?? 0))}");
-                try { textureConfig = TextureConfigParser.Parse(texAsset.text); }
-                catch (Exception ex)
-                { StaticLogger.LogWarning($"Custom Maps: Could not parse TextureConfig: {ex.Message}"); }
-                StaticLogger.LogInfo($"Custom Maps: TextureConfig parse — config={textureConfig != null}, entries={(textureConfig?.entries != null ? textureConfig.entries.Count.ToString() : "NULL")}");
-            }
-            else
-            {
-                StaticLogger.LogWarning("Custom Maps: TextureConfig asset is NULL — tried 3 name variants.");
-            }
-            if (textureConfig?.entries != null)
-            {
-                foreach (var entry in textureConfig.entries)
+                TextAsset texAsset = bundle.LoadAsset<TextAsset>("TextureConfig")
+                                  ?? bundle.LoadAsset<TextAsset>("assets/_cmexporttemp/textureconfig.json")
+                                  ?? bundle.LoadAsset<TextAsset>("textureconfig");
+                if (texAsset != null)
                 {
-                    if (textureMap.ContainsKey(entry.tex)) continue;
-                    var tex = bundle.LoadAsset<Texture2D>(entry.tex);
-                    if (tex != null)
-                    {
-                        // DXT textures from a Windows-target bundle render black on Mac Metal.
-                        // Blit to RGBA32 via GPU to get a platform-native, always-renderable texture.
-                        if (tex.format == TextureFormat.DXT1 || tex.format == TextureFormat.DXT5 ||
-                            tex.format == TextureFormat.DXT1Crunched || tex.format == TextureFormat.DXT5Crunched)
-                        {
-                            var rt = RenderTexture.GetTemporary(tex.width, tex.height, 0,
-                                RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
-                            Graphics.Blit(tex, rt);
-                            var rgba = new Texture2D(tex.width, tex.height, TextureFormat.RGBA32, false);
-                            var prevRT = RenderTexture.active;
-                            RenderTexture.active = rt;
-                            rgba.ReadPixels(new Rect(0, 0, tex.width, tex.height), 0, 0);
-                            rgba.Apply();
-                            RenderTexture.active = prevRT;
-                            RenderTexture.ReleaseTemporary(rt);
-                            tex = rgba;
-                            var sp = rgba.GetPixel(512, 512);
-                            StaticLogger.LogInfo($"Custom Maps: Converted to RGBA32 — pixel(512,512)=({sp.r:F2},{sp.g:F2},{sp.b:F2},{sp.a:F2})");
-                        }
-                        tex.filterMode = FilterMode.Point; // keep pixel-art textures crisp
-                        textureMap[entry.tex] = tex;
-                        StaticLogger.LogInfo($"Custom Maps: Loaded texture '{entry.tex}' — format={tex.format} size={tex.width}x{tex.height}");
-                    }
-                    else
-                        StaticLogger.LogWarning($"Custom Maps: Texture '{entry.tex}' not found in bundle.");
+                    StaticLogger.LogInfo($"Custom Maps: TextureConfig asset loaded ({texAsset.text?.Length ?? -1} chars): {texAsset.text?.Substring(0, Mathf.Min(120, texAsset.text?.Length ?? 0))}");
+                    try { textureConfig = TextureConfigParser.Parse(texAsset.text); }
+                    catch (Exception ex)
+                    { StaticLogger.LogWarning($"Custom Maps: Could not parse TextureConfig: {ex.Message}"); }
+                    StaticLogger.LogInfo($"Custom Maps: TextureConfig parse — config={textureConfig != null}, entries={(textureConfig?.entries != null ? textureConfig.entries.Count.ToString() : "NULL")}");
                 }
-                StaticLogger.LogInfo(
-                    $"Custom Maps: TextureConfig loaded — {textureConfig.entries.Count} slot(s), " +
-                    $"{textureMap.Count} unique texture(s).");
+                else
+                {
+                    StaticLogger.LogWarning("Custom Maps: TextureConfig asset is NULL — tried 3 name variants.");
+                }
+                if (textureConfig?.entries != null)
+                {
+                    foreach (TextureEntry entry in textureConfig.entries)
+                    {
+                        if (textureMap.ContainsKey(entry.tex)) continue;
+                        Texture2D tex = bundle.LoadAsset<Texture2D>(entry.tex);
+                        if (tex != null)
+                        {
+                            // DXT textures from a Windows-target bundle render black on Mac Metal.
+                            // Blit to RGBA32 via GPU to get a platform-native, always-renderable texture.
+                            if (tex.format == TextureFormat.DXT1 || tex.format == TextureFormat.DXT5 ||
+                                tex.format == TextureFormat.DXT1Crunched || tex.format == TextureFormat.DXT5Crunched)
+                            {
+                                RenderTexture rt = RenderTexture.GetTemporary(tex.width, tex.height, 0,
+                                    RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                                Graphics.Blit(tex, rt);
+                                Texture2D rgba = new(tex.width, tex.height, TextureFormat.RGBA32, false);
+                                RenderTexture prevRT = RenderTexture.active;
+                                RenderTexture.active = rt;
+                                rgba.ReadPixels(new Rect(0, 0, tex.width, tex.height), 0, 0);
+                                rgba.Apply();
+                                RenderTexture.active = prevRT;
+                                RenderTexture.ReleaseTemporary(rt);
+                                tex = rgba;
+                                TrackResource(rgba); // runtime-created, freed on next map load
+                                Color sp = rgba.GetPixel(512, 512);
+                                StaticLogger.LogInfo($"Custom Maps: Converted to RGBA32 — pixel(512,512)=({sp.r:F2},{sp.g:F2},{sp.b:F2},{sp.a:F2})");
+                            }
+                            tex.filterMode = FilterMode.Point; // keep pixel-art textures crisp
+                            textureMap[entry.tex] = tex;
+                            StaticLogger.LogInfo($"Custom Maps: Loaded texture '{entry.tex}' — format={tex.format} size={tex.width}x{tex.height}");
+                        }
+                        else
+                            StaticLogger.LogWarning($"Custom Maps: Texture '{entry.tex}' not found in bundle.");
+                    }
+                    StaticLogger.LogInfo(
+                        $"Custom Maps: TextureConfig loaded — {textureConfig.entries.Count} slot(s), " +
+                        $"{textureMap.Count} unique texture(s).");
+                }
+                else
+                    StaticLogger.LogInfo("Custom Maps: No TextureConfig in bundle — geometry will use flat colours.");
             }
-            else
-                StaticLogger.LogInfo("Custom Maps: No TextureConfig in bundle — geometry will use flat colours.");
-        }
 
             // ── Force-apply a visible material using the game's own shaders ─────────
             // Shaders compiled into the AssetBundle may not exist in the game's shader
@@ -249,7 +349,7 @@ namespace CustomMapsMod
             // ── Collect UplinkSpawn markers and pick one randomly ─────────────────
             // If the map maker places multiple UplinkSpawn children, the uplink is
             // sent to a random one each game.  Falls back to world origin if absent.
-            var uplinkTargets = new List<Vector3>();
+            List<Vector3> uplinkTargets = [];
             foreach (Transform t in mapGeo.GetComponentsInChildren<Transform>(true))
             {
                 if (t.name.Equals("UplinkSpawn", StringComparison.OrdinalIgnoreCase))
@@ -270,7 +370,7 @@ namespace CustomMapsMod
             // ── Collect ResupplySpawn markers ─────────────────────────────────────
             // Map makers place "ResupplySpawn" (or "ResupplySpawn_N") empties to
             // control where the level's AmmoCrate resupply stations appear.
-            activeResupplyTargets = new List<Vector3>();
+            activeResupplyTargets = [];
             foreach (Transform t in mapGeo.GetComponentsInChildren<Transform>(true))
             {
                 if (t.name.StartsWith("ResupplySpawn", StringComparison.OrdinalIgnoreCase))
@@ -290,14 +390,14 @@ namespace CustomMapsMod
             // so every game-side reset is caught and corrected.
             // Runs on ALL clients independently — Mirror does NOT auto-sync scene-
             // object transforms.
-            var uplinkRepos = mapGeo.AddComponent<UplinkRepositioner>();
+            UplinkRepositioner uplinkRepos = mapGeo.AddComponent<UplinkRepositioner>();
             uplinkRepos.mapGeo = mapGeo;
 
             // ── Inject spawn points into the HardlineGameManager ──────────────────
             // HardlineGameManager is a Mirror-spawned network object; it may not exist
             // yet when sceneLoaded fires. Save mapGeo so GameManagerStartPatch can
             // inject spawn points the moment HardlineGameManager.Start() runs.
-            var gameManager = UnityEngine.Object.FindObjectOfType<HardlineGameManager>();
+            HardlineGameManager gameManager = UnityEngine.Object.FindObjectOfType<HardlineGameManager>();
             if (gameManager != null)
             {
                 InjectSpawnPoints(gameManager, mapGeo);
@@ -330,10 +430,10 @@ namespace CustomMapsMod
         }
 
         // ── Hides Level1 scene geometry while preserving game-system objects ───────
-        static void HideBaseSceneGeometry(GameObject preserveObject)
+        private static void HideBaseSceneGeometry(GameObject preserveObject)
         {
             int hidden = 0;
-            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+            foreach (GameObject root in SceneManager.GetActiveScene().GetRootGameObjects())
             {
                 if (root == preserveObject) continue;
                 if (ShouldPreserve(root)) continue;
@@ -348,11 +448,11 @@ namespace CustomMapsMod
                 // and causing "waiting for players" to hang forever on the host.
                 // Instead, disable only the visual and physics components so the GO stays
                 // in Mirror's scene-object registry but is invisible and has no collision.
-                foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+                foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true))
                     r.enabled = false;
-                foreach (var t in root.GetComponentsInChildren<Terrain>(true))
+                foreach (Terrain t in root.GetComponentsInChildren<Terrain>(true))
                     t.enabled = false;
-                foreach (var c in root.GetComponentsInChildren<Collider>(true))
+                foreach (Collider c in root.GetComponentsInChildren<Collider>(true))
                     c.enabled = false;
                 hidden++;
             }
@@ -361,7 +461,7 @@ namespace CustomMapsMod
 
         // Returns true if the object should be kept visible (is a game-system object,
         // not terrain / map geometry).
-        static bool ShouldPreserve(GameObject go)
+        private static bool ShouldPreserve(GameObject go)
         {
             // Always keep anything that has a NetworkBehaviour (game manager etc.)
             if (go.GetComponentInChildren<NetworkBehaviour>() != null) return true;
@@ -384,8 +484,8 @@ namespace CustomMapsMod
         //    injects them into HardlineGameManager's team spawn lists. ──────────────
         public static void InjectSpawnPoints(HardlineGameManager manager, GameObject mapGeo)
         {
-            var t1 = new List<GameObject>();
-            var t2 = new List<GameObject>();
+            List<GameObject> t1 = [];
+            List<GameObject> t2 = [];
 
             foreach (Transform t in mapGeo.GetComponentsInChildren<Transform>(true))
             {
@@ -400,10 +500,8 @@ namespace CustomMapsMod
             if (t1.Count == 0) StaticLogger.LogWarning("Custom Maps: No T1Spawn_* objects found in MapGeometry!");
             if (t2.Count == 0) StaticLogger.LogWarning("Custom Maps: No T2Spawn_* objects found in MapGeometry!");
 
-            var t1Field = typeof(HardlineGameManager).GetField(
-                "team1Spawns", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
-            var t2Field = typeof(HardlineGameManager).GetField(
-                "team2Spawns", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+            FieldInfo t1Field = Team1SpawnsField;
+            FieldInfo t2Field = Team2SpawnsField;
 
             // If either field isn't found, dump all HardlineGameManager fields so we can
             // identify the correct name from the log.
@@ -411,7 +509,7 @@ namespace CustomMapsMod
             {
                 StaticLogger.LogWarning("Custom Maps: 'team1Spawns' or 'team2Spawns' field NOT found on HardlineGameManager!");
                 StaticLogger.LogWarning("Custom Maps: Available HardlineGameManager fields:");
-                foreach (var f in typeof(HardlineGameManager).GetFields(
+                foreach (FieldInfo f in typeof(HardlineGameManager).GetFields(
                     BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public))
                     StaticLogger.LogWarning($"  [{f.FieldType.Name}] {f.Name}");
             }
@@ -420,29 +518,22 @@ namespace CustomMapsMod
                 StaticLogger.LogInfo("Custom Maps: team1Spawns and team2Spawns fields located successfully.");
             }
 
-            // ── Step 1: physically move the game's OWN Level1 spawn objects ────────
-            // The game may cache direct references to those GameObjects and read their
-            // .position later (rather than always reading team1Spawns fresh).
-            // Moving them ensures every code path ends up at the custom-map position.
-            var existingT1 = t1Field?.GetValue(manager) as List<GameObject>;
-            var existingT2 = t2Field?.GetValue(manager) as List<GameObject>;
-
-            if (existingT1 != null && t1.Count > 0)
+            if (t1Field?.GetValue(manager) is List<GameObject> existingT1 && t1.Count > 0)
             {
                 for (int i = 0; i < existingT1.Count; i++)
                 {
-                    var go = existingT1[i];
+                    GameObject go = existingT1[i];
                     if (go != null && !go.transform.IsChildOf(mapGeo.transform))
                         go.transform.position = t1[i % t1.Count].transform.position;
                 }
                 StaticLogger.LogInfo($"Custom Maps: Moved {existingT1.Count} Level1 T1 spawn object(s) to custom positions.");
             }
 
-            if (existingT2 != null && t2.Count > 0)
+            if (t2Field?.GetValue(manager) is List<GameObject> existingT2 && t2.Count > 0)
             {
                 for (int i = 0; i < existingT2.Count; i++)
                 {
-                    var go = existingT2[i];
+                    GameObject go = existingT2[i];
                     if (go != null && !go.transform.IsChildOf(mapGeo.transform))
                         go.transform.position = t2[i % t2.Count].transform.position;
                 }
@@ -466,14 +557,14 @@ namespace CustomMapsMod
         // silently ignores Built-in RP materials — they render as invisible.
         // We borrow the shader from an uplink station (confirmed camera-visible)
         // so we always use the right shader for whatever RP this game runs.
-        static void ApplyFallbackMaterial(GameObject mapGeo, ColorConfigData colorConfig = null,
+        private static void ApplyFallbackMaterial(GameObject mapGeo, ColorConfigData colorConfig = null,
             TextureConfigData textureConfig = null, Dictionary<string, Texture2D> textureMap = null)
         {
             // ── Borrow shader from any renderer inside the uplink hierarchy ──────────
             // The actual mesh renderers are on child objects, not the root "Uplink Station"
             // object itself, so we match by root name rather than the renderer's own name.
             Shader sh = null;
-            foreach (var mr in UnityEngine.Object.FindObjectsOfType<MeshRenderer>(true))
+            foreach (MeshRenderer mr in UnityEngine.Object.FindObjectsOfType<MeshRenderer>(true))
             {
                 if (mr.sharedMaterial?.shader == null) continue;
                 string rootName = mr.transform.root.name.ToLower();
@@ -486,8 +577,7 @@ namespace CustomMapsMod
             }
 
             // ── Fallbacks in render-pipeline order ────────────────────────────────────
-            sh = sh
-              ?? Shader.Find("Universal Render Pipeline/Lit")
+            sh ??= Shader.Find("Universal Render Pipeline/Lit")
               ?? Shader.Find("Universal Render Pipeline/Unlit")
               ?? Shader.Find("Unlit/Color")
               ?? Shader.Find("Standard")
@@ -502,28 +592,28 @@ namespace CustomMapsMod
             StaticLogger.LogInfo($"Custom Maps: Using shader '{sh.name}' for fallback materials (per-renderer color).");
 
             // Build a (rendererIndex, slotIndex) → TextureEntry lookup for O(1) access.
-            var texLookup = new Dictionary<(int, int), TextureEntry>();
+            Dictionary<(int, int), TextureEntry> texLookup = [];
             if (textureConfig?.entries != null)
-                foreach (var e in textureConfig.entries)
+                foreach (TextureEntry e in textureConfig.entries)
                     texLookup[(e.ri, e.si)] = e;
 
             // ── Grab the built-in Cube mesh via a temp primitive ──────────────────────
             // Built-in meshes (Cube, etc.) may be stripped from the AssetBundle.
             // Creating a temp primitive gives us a guaranteed valid mesh reference.
-            var tmpCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            GameObject tmpCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             Mesh cubeMesh = tmpCube.GetComponent<MeshFilter>().sharedMesh;
             GameObject.DestroyImmediate(tmpCube);
 
             // ── Apply to all MeshRenderers in the custom geometry ─────────────────────
-            var renderers = mapGeo.GetComponentsInChildren<MeshRenderer>(true);
+            MeshRenderer[] renderers = mapGeo.GetComponentsInChildren<MeshRenderer>(true);
             StaticLogger.LogInfo($"Custom Maps: Found {renderers.Length} MeshRenderer(s) in MapGeometry.");
 
-            int fixedMesh  = 0;
-            int colorFlat  = 0; // index into colorConfig's flat r/g/b/a arrays
+            int fixedMesh = 0;
+            int colorFlat = 0; // index into colorConfig's flat r/g/b/a arrays
 
             for (int ri = 0; ri < renderers.Length; ri++)
             {
-                var mr = renderers[ri];
+                MeshRenderer mr = renderers[ri];
                 mr.enabled = true;
 
                 // ── Determine slot count and colours ──────────────────────────────────
@@ -535,8 +625,8 @@ namespace CustomMapsMod
                 else
                     slotCount = Mathf.Max(mr.sharedMaterials.Length, 1);
 
-                var srcMats = mr.sharedMaterials;
-                var newMats = new Material[slotCount];
+                Material[] srcMats = mr.sharedMaterials;
+                Material[] newMats = new Material[slotCount];
 
                 for (int si = 0; si < slotCount; si++)
                 {
@@ -556,9 +646,8 @@ namespace CustomMapsMod
                     if (col.a < 0.1f) col = new Color(0.55f, 0.55f, 0.55f, 1f);
 
                     // ── Check for a texture on this slot ──────────────────────────────
-                    TextureEntry texEntry = null;
                     Texture2D tex = null;
-                    texLookup.TryGetValue((ri, si), out texEntry);
+                    texLookup.TryGetValue((ri, si), out TextureEntry texEntry);
                     if (texEntry != null && textureMap != null)
                         textureMap.TryGetValue(texEntry.tex, out tex);
 
@@ -568,26 +657,27 @@ namespace CustomMapsMod
                         // Assign atlas texture to FlatKit's _BaseMap. With _BaseColor=white
                         // and _TextureImpact=1 the output is exactly the texture colour.
                         m = new Material(sh);
-                        m.SetColor("_BaseColor",     Color.white);
-                        m.SetColor("_ColorDim",      Color.white);
+                        TrackResource(m); // runtime-created, freed on next map load
+                        m.SetColor("_BaseColor", Color.white);
+                        m.SetColor("_ColorDim", Color.white);
                         m.SetColor("_ColorDimSteps", Color.white);
                         m.SetColor("_ColorDimCurve", Color.white);
                         m.SetColor("_ColorDimExtra", Color.white);
                         m.SetFloat("_LightContribution", 0f);
                         m.SetTexture("_BaseMap", tex);
-                        m.SetTexture("_MainTex",  tex);
+                        m.SetTexture("_MainTex", tex);
                         m.SetFloat("_TextureImpact", 1f);
                         m.EnableKeyword("_TEXTUREBLENDINGMODE_MULTIPLY");
-                        m.SetTextureScale("_BaseMap",  new Vector2(texEntry.tx, texEntry.ty));
+                        m.SetTextureScale("_BaseMap", new Vector2(texEntry.tx, texEntry.ty));
                         m.SetTextureOffset("_BaseMap", new Vector2(texEntry.ox, texEntry.oy));
-                        m.SetTextureScale("_MainTex",  new Vector2(texEntry.tx, texEntry.ty));
+                        m.SetTextureScale("_MainTex", new Vector2(texEntry.tx, texEntry.ty));
                         m.SetTextureOffset("_MainTex", new Vector2(texEntry.ox, texEntry.oy));
-
                     }
                     else
                     {
                         // Colour-only slot — existing behaviour.
                         m = new Material(sh);
+                        TrackResource(m); // runtime-created, freed on next map load
                         m.color = col;
                         if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", col);
                     }
@@ -597,9 +687,9 @@ namespace CustomMapsMod
 
                 // Disable shadow casting to prevent shadow acne / flickering on thin geometry.
                 mr.shadowCastingMode = ShadowCastingMode.Off;
-                mr.receiveShadows    = false;
+                mr.receiveShadows = false;
 
-                var mf = mr.GetComponent<MeshFilter>();
+                MeshFilter mf = mr.GetComponent<MeshFilter>();
                 string meshName = mf?.sharedMesh?.name ?? "NULL";
                 if (mf != null && mf.sharedMesh == null)
                 {
@@ -621,21 +711,20 @@ namespace CustomMapsMod
         // Level1 root). Moves each individual UplinkStation child so that whichever
         // one the game activates, it lands exactly at target.
         // `target` comes from the "UplinkSpawn" child of MapGeometry (map-maker defined).
-        internal static void MoveUplinksToPosition(Vector3 target, GameObject customMapGeo)
+        internal static void MoveUplinksToPosition(Vector3 target)
         {
             // The game stores all uplink instances as children of "UplinkStations".
             // RoundsHardlineGameManager.SetUplinkNumber activates one child per round,
             // chosen randomly.  Moving the parent root would only be correct for one
             // child's offset; instead we move EVERY child so any activated one lands
             // at the target.
-            GameObject uplinkStationsGO = GameObject.Find("UplinkStations");
-            if (uplinkStationsGO == null)
+            Transform uplinkStationsRoot = GetUplinkStationsRoot();
+            if (uplinkStationsRoot == null)
             {
                 StaticLogger.LogInfo("Custom Maps: 'UplinkStations' not found — skipping.");
                 return;
             }
 
-            Transform uplinkStationsRoot = uplinkStationsGO.transform;
             int movedCount = 0;
 
             for (int i = 0; i < uplinkStationsRoot.childCount; i++)
@@ -693,7 +782,7 @@ namespace CustomMapsMod
             int moveCount = Math.Min(crates.Length, activeResupplyTargets.Count);
             for (int i = 0; i < moveCount; i++)
             {
-                var go = crates[i];
+                GameObject go = crates[i];
                 go.transform.position = activeResupplyTargets[i];
 
                 // Re-enable the full parent chain (GameObjects) so the object is active.
@@ -701,11 +790,11 @@ namespace CustomMapsMod
                 while (t != null) { t.gameObject.SetActive(true); t = t.parent; }
 
                 // Re-enable renderers on this object and all children.
-                foreach (var r in go.GetComponentsInChildren<Renderer>(true))
+                foreach (Renderer r in go.GetComponentsInChildren<Renderer>(true))
                     r.enabled = true;
 
                 // Re-enable colliders on this object and all children.
-                foreach (var c in go.GetComponentsInChildren<Collider>(true))
+                foreach (Collider c in go.GetComponentsInChildren<Collider>(true))
                     c.enabled = true;
 
                 // Also re-enable renderers AND colliders on ANCESTOR objects.
@@ -716,9 +805,9 @@ namespace CustomMapsMod
                 Transform ancestor = go.transform.parent;
                 for (int walk = 0; walk < 10 && ancestor != null; walk++, ancestor = ancestor.parent)
                 {
-                    foreach (var r in ancestor.GetComponents<Renderer>())
+                    foreach (Renderer r in ancestor.GetComponents<Renderer>())
                         r.enabled = true;
-                    foreach (var c in ancestor.GetComponents<Collider>())
+                    foreach (Collider c in ancestor.GetComponents<Collider>())
                         c.enabled = true;
                 }
 
@@ -752,7 +841,7 @@ namespace CustomMapsMod
         // ── Applies lighting from a JSON string serialized by the exporter ──────────
         // Controls the scene directional light, ambient light, and fog.
         // Called before bundle.Unload so the TextAsset reference is still valid.
-        static void ApplyLightingConfig(string json)
+        private static void ApplyLightingConfig(string json)
         {
             if (string.IsNullOrEmpty(json)) return;
 
@@ -765,23 +854,23 @@ namespace CustomMapsMod
             }
 
             // Ambient
-            RenderSettings.ambientMode  = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
             RenderSettings.ambientLight = new Color(ld.ambR, ld.ambG, ld.ambB);
 
             // Fog
-            RenderSettings.fog        = ld.fogEnabled;
-            RenderSettings.fogColor   = new Color(ld.fogR, ld.fogG, ld.fogB);
-            RenderSettings.fogMode    = FogMode.ExponentialSquared;
+            RenderSettings.fog = ld.fogEnabled;
+            RenderSettings.fogColor = new Color(ld.fogR, ld.fogG, ld.fogB);
+            RenderSettings.fogMode = FogMode.ExponentialSquared;
             RenderSettings.fogDensity = ld.fogDensity;
 
             // Directional light — first active one in the scene
             Light sun = null;
-            foreach (var l in UnityEngine.Object.FindObjectsOfType<Light>(true))
+            foreach (Light l in UnityEngine.Object.FindObjectsOfType<Light>(true))
                 if (l.type == LightType.Directional) { sun = l; break; }
 
             if (sun != null)
             {
-                sun.color     = new Color(ld.sunR, ld.sunG, ld.sunB);
+                sun.color = new Color(ld.sunR, ld.sunG, ld.sunB);
                 sun.intensity = ld.sunIntensity;
                 sun.transform.rotation = Quaternion.Euler(ld.sunRotX, ld.sunRotY, ld.sunRotZ);
                 sun.gameObject.SetActive(true);
@@ -798,9 +887,7 @@ namespace CustomMapsMod
                 $"Custom Maps: Lighting applied — ambient=({ld.ambR:F2},{ld.ambG:F2},{ld.ambB:F2})" +
                 $" fog={ld.fogEnabled}");
         }
-
     }
-
 
     // ── UplinkRepositioner ───────────────────────────────────────────────────────
     // Attached to MapGeometry at scene load. Waits 2 seconds before repositioning
@@ -812,7 +899,7 @@ namespace CustomMapsMod
     {
         public GameObject mapGeo;
 
-        IEnumerator Start()
+        private IEnumerator Start()
         {
             // The game's own uplink-placement logic (UplinkStation.Start / Awake and
             // RoundsHardlineGameManager round-start code) runs at unpredictable times
@@ -823,7 +910,7 @@ namespace CustomMapsMod
             {
                 yield return new WaitForSeconds(1f);
                 if (mapGeo == null) { Destroy(this); yield break; }
-                CustomMapsPlugin.MoveUplinksToPosition(CustomMapsPlugin.activeUplinkTarget, mapGeo);
+                CustomMapsPlugin.MoveUplinksToPosition(CustomMapsPlugin.activeUplinkTarget);
             }
             Destroy(this);
         }
@@ -836,9 +923,9 @@ namespace CustomMapsMod
     // Destroys itself after patching.
     public class CameraRenderFixer : MonoBehaviour
     {
-        bool done = false;
+        private bool done = false;
 
-        void LateUpdate()
+        private void LateUpdate()
         {
             if (done) return;
 
@@ -866,7 +953,7 @@ namespace CustomMapsMod
     [Serializable]
     public class ColorConfigData
     {
-        public int[]   slotCounts; // number of material slots per renderer
+        public int[] slotCounts; // number of material slots per renderer
         public float[] r, g, b, a; // one value per material slot (flat)
     }
 
@@ -881,59 +968,80 @@ namespace CustomMapsMod
 
     public class TextureEntry
     {
-        public int    ri, si;
+        public int ri, si;
         public string tex;
-        public float  tx = 1f, ty = 1f;
-        public float  ox, oy;
+        public float tx = 1f, ty = 1f;
+        public float ox, oy;
     }
 
     // ── Manual JSON parser for TextureConfig ─────────────────────────────────
     // Unity's JsonUtility cannot deserialize List<CustomClass> defined in a BepInEx
     // mod assembly, so we parse the known format by hand with Regex.
-    static class TextureConfigParser
+    internal static class TextureConfigParser
     {
+        // All patterns are precompiled once. The old version constructed a fresh
+        // Regex per field per entry (7 regex compiles × N entries per map load).
+        private static readonly System.Text.RegularExpressions.Regex ObjRx =
+            new(@"\{[^{}]*\}",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        private static readonly Dictionary<string, System.Text.RegularExpressions.Regex> IntRx = [];
+        private static readonly Dictionary<string, System.Text.RegularExpressions.Regex> FltRx = [];
+        private static readonly Dictionary<string, System.Text.RegularExpressions.Regex> StrRx = [];
+
+        private static System.Text.RegularExpressions.Regex GetRx(
+            Dictionary<string, System.Text.RegularExpressions.Regex> cache, string key, string pattern)
+        {
+            if (!cache.TryGetValue(key, out System.Text.RegularExpressions.Regex rx))
+            {
+                rx = new System.Text.RegularExpressions.Regex(pattern,
+                    System.Text.RegularExpressions.RegexOptions.Compiled);
+                cache[key] = rx;
+            }
+            return rx;
+        }
+
         internal static TextureConfigData Parse(string json)
         {
-            var result = new TextureConfigData { entries = new List<TextureEntry>() };
+            TextureConfigData result = new() { entries = [] };
             int arrStart = json.IndexOf('[');
-            int arrEnd   = json.LastIndexOf(']');
+            int arrEnd = json.LastIndexOf(']');
             if (arrStart < 0 || arrEnd <= arrStart) return result;
             string arr = json.Substring(arrStart + 1, arrEnd - arrStart - 1);
 
-            var objRx = new System.Text.RegularExpressions.Regex(@"\{[^{}]*\}");
-            foreach (System.Text.RegularExpressions.Match m in objRx.Matches(arr))
+            foreach (System.Text.RegularExpressions.Match m in ObjRx.Matches(arr))
             {
                 string obj = m.Value;
-                var e = new TextureEntry
+                TextureEntry e = new()
                 {
-                    ri  = Int(obj,    "ri",  0),
-                    si  = Int(obj,    "si",  0),
-                    tex = Str(obj,    "tex"),
-                    tx  = Flt(obj,    "tx",  1f),
-                    ty  = Flt(obj,    "ty",  1f),
-                    ox  = Flt(obj,    "ox",  0f),
-                    oy  = Flt(obj,    "oy",  0f),
+                    ri = Int(obj, "ri", 0),
+                    si = Int(obj, "si", 0),
+                    tex = Str(obj, "tex"),
+                    tx = Flt(obj, "tx", 1f),
+                    ty = Flt(obj, "ty", 1f),
+                    ox = Flt(obj, "ox", 0f),
+                    oy = Flt(obj, "oy", 0f),
                 };
                 result.entries.Add(e);
             }
             return result;
         }
 
-        static int Int(string obj, string key, int def)
+        private static int Int(string obj, string key, int def)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(obj, $@"""{key}""\s*:\s*(-?\d+)");
+            System.Text.RegularExpressions.Match m = GetRx(IntRx, key, $@"""{key}""\s*:\s*(-?\d+)").Match(obj);
             return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : def;
         }
-        static float Flt(string obj, string key, float def)
+        private static float Flt(string obj, string key, float def)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(obj, $@"""{key}""\s*:\s*(-?[\d.Ee+\-]+)");
+            System.Text.RegularExpressions.Match m = GetRx(FltRx, key, $@"""{key}""\s*:\s*(-?[\d.Ee+\-]+)").Match(obj);
             return m.Success && float.TryParse(m.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : def;
         }
-        static string Str(string obj, string key)
+        private static string Str(string obj, string key)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(obj, $@"""{key}""\s*:\s*""([^""]*)""");
+            System.Text.RegularExpressions.Match m = GetRx(StrRx, key, $@"""{key}""\s*:\s*""([^""]*)""").Match(obj);
             return m.Success ? m.Groups[1].Value : null;
         }
     }
@@ -951,7 +1059,7 @@ namespace CustomMapsMod
         // Ambient
         public float ambR = 0.21f, ambG = 0.23f, ambB = 0.26f;
         // Fog
-        public bool  fogEnabled = false;
+        public bool fogEnabled = false;
         public float fogR = 0.5f, fogG = 0.5f, fogB = 0.5f;
         public float fogDensity = 0.01f;
     }
@@ -962,15 +1070,15 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(LobbyUIManager), "Start")]
     public class LobbyStartPatch
     {
-        static readonly FieldInfo mapSelectField =
+        private static readonly FieldInfo mapSelectField =
             typeof(LobbyUIManager).GetField("mapSelect",
                 BindingFlags.NonPublic | BindingFlags.Instance);
 
-        static readonly FieldInfo possibleMapIconsField =
+        private static readonly FieldInfo possibleMapIconsField =
             typeof(LobbyUIManager).GetField("possibleMapIcons",
                 BindingFlags.NonPublic | BindingFlags.Instance);
 
-        static void Postfix(LobbyUIManager __instance)
+        private static void Postfix(LobbyUIManager __instance)
         {
             if (CustomMapsPlugin.customMapBundles.Count == 0) return;
 
@@ -986,24 +1094,19 @@ namespace CustomMapsMod
             CustomMapsPlugin.builtinMapCount = mapSelect.options.Count;
 
             // Add one dropdown entry per bundle file.
-            var newOptions = CustomMapsPlugin.customMapBundles
-                .Select(b => new Dropdown.OptionData("[Custom] " + Path.GetFileNameWithoutExtension(b)))
-                .ToList();
+            List<Dropdown.OptionData> newOptions = [.. CustomMapsPlugin.customMapBundles.Select(b => new Dropdown.OptionData("[Custom] " + Path.GetFileNameWithoutExtension(b)))];
             mapSelect.AddOptions(newOptions);
 
             // Expand possibleMapIcons so that Update()'s indexed access doesn't throw.
             // Custom-map slots are left as null → RawImage.texture = null is valid.
-            var icons = possibleMapIconsField?.GetValue(__instance) as Texture[];
-            if (icons != null)
+            if (possibleMapIconsField?.GetValue(__instance) is Texture[] icons)
             {
-                var expanded = new Texture[icons.Length + CustomMapsPlugin.customMapBundles.Count];
+                Texture[] expanded = new Texture[icons.Length + CustomMapsPlugin.customMapBundles.Count];
                 Array.Copy(icons, expanded, icons.Length);
                 possibleMapIconsField.SetValue(__instance, expanded);
             }
 
-            CustomMapsPlugin.StaticLogger.LogInfo(
-                $"Custom Maps: Added {CustomMapsPlugin.customMapBundles.Count} custom map(s) to dropdown " +
-                $"(built-in count: {CustomMapsPlugin.builtinMapCount}).");
+            CustomMapsPlugin.StaticLogger.LogInfo($"Custom Maps: Added {CustomMapsPlugin.customMapBundles.Count} custom map(s) to dropdown " + $"(built-in count: {CustomMapsPlugin.builtinMapCount}).");
 
             // ── Backfill pendingBundle if the host had already selected a custom map ──
             // RpcMapSelectedPatch fires before LobbyUIManager.Start() on the guest, so
@@ -1034,13 +1137,13 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(LobbyUIManager), "StartGame")]
     public class StartGamePatch
     {
-        static readonly FieldInfo mapSelectField =
+        private static readonly FieldInfo mapSelectField =
             typeof(LobbyUIManager).GetField("mapSelect",
                 BindingFlags.NonPublic | BindingFlags.Instance);
 
-        static int savedIndex = -1;
+        private static int savedIndex = -1;
 
-        static bool Prefix(LobbyUIManager __instance)
+        private static bool Prefix(LobbyUIManager __instance)
         {
             Dropdown mapSelect = mapSelectField?.GetValue(__instance) as Dropdown;
             if (mapSelect == null) return true;
@@ -1069,13 +1172,13 @@ namespace CustomMapsMod
             return true; // let the original run — it handles all multiplayer sync
         }
 
-        static void Postfix(LobbyUIManager __instance)
+        private static void Postfix(LobbyUIManager __instance)
         {
             // Restore the dropdown display without triggering onValueChanged.
             if (savedIndex >= 0)
             {
-                var mapSelect = mapSelectField?.GetValue(__instance) as Dropdown;
-                if (mapSelect != null) mapSelect.SetValueWithoutNotify(savedIndex);
+                Dropdown mapSelect = mapSelectField?.GetValue(__instance) as Dropdown;
+                mapSelect?.SetValueWithoutNotify(savedIndex);
                 savedIndex = -1;
             }
         }
@@ -1087,7 +1190,7 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(HardlineGameManager), "Start")]
     public class GameManagerStartPatch
     {
-        static void Postfix(HardlineGameManager __instance)
+        private static void Postfix(HardlineGameManager __instance)
         {
             if (CustomMapsPlugin.pendingMapGeo == null) return;
             CustomMapsPlugin.StaticLogger.LogInfo(
@@ -1105,7 +1208,7 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(HardlineGameManager), "AllPlayersLoaded")]
     public class AllPlayersLoadedPatch
     {
-        static void Prefix(HardlineGameManager __instance)
+        private static void Prefix(HardlineGameManager __instance)
         {
             if (CustomMapsPlugin.activeMapGeo == null) return;
             CustomMapsPlugin.StaticLogger.LogInfo(
@@ -1115,13 +1218,13 @@ namespace CustomMapsMod
 
         // Postfix fires AFTER the original AllPlayersLoaded, which may reposition the
         // uplink and resupply stations as part of round setup.  Override those resets.
-        static void Postfix(HardlineGameManager __instance)
+        private static void Postfix(HardlineGameManager __instance)
         {
             if (CustomMapsPlugin.activeMapGeo == null) return;
             CustomMapsPlugin.StaticLogger.LogInfo(
                 "Custom Maps: AllPlayersLoaded (post) — repositioning uplink and resupply.");
             CustomMapsPlugin.MoveUplinksToPosition(
-                CustomMapsPlugin.activeUplinkTarget, CustomMapsPlugin.activeMapGeo);
+                CustomMapsPlugin.activeUplinkTarget);
             CustomMapsPlugin.RepositionResupplyStations();
         }
     }
@@ -1134,26 +1237,26 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "SetUplinkNumber")]
     public class SetUplinkNumberPatch
     {
-        static void Postfix(int number)
+        private static void Postfix(int number)
         {
             if (CustomMapsPlugin.activeMapGeo == null) return;
             CustomMapsPlugin.StaticLogger.LogInfo(
                 "Custom Maps: SetUplinkNumber (post) — repositioning uplink station.");
             CustomMapsPlugin.MoveUplinksToPosition(
-                CustomMapsPlugin.activeUplinkTarget, CustomMapsPlugin.activeMapGeo);
+                CustomMapsPlugin.activeUplinkTarget);
 
             // UplinkStation.Start() sets Visible=false which disables renderers on
             // sub-objects. If DisableUplink() also called SetActive(false) on any
             // sub-object, SetActive(true) on the parent won't re-enable them.
             // Force-enable every sub-object and renderer in the selected child so
             // the uplink is always visible in the correct position.
-            GameObject uplinkStationsGO = GameObject.Find("UplinkStations");
-            if (uplinkStationsGO != null && number < uplinkStationsGO.transform.childCount)
+            Transform uplinkStationsRoot = CustomMapsPlugin.GetUplinkStationsRoot();
+            if (uplinkStationsRoot != null && number < uplinkStationsRoot.childCount)
             {
-                Transform chosen = uplinkStationsGO.transform.GetChild(number);
+                Transform chosen = uplinkStationsRoot.GetChild(number);
                 foreach (Transform sub in chosen.GetComponentsInChildren<Transform>(true))
                     sub.gameObject.SetActive(true);
-                foreach (var r in chosen.GetComponentsInChildren<Renderer>(true))
+                foreach (Renderer r in chosen.GetComponentsInChildren<Renderer>(true))
                     r.enabled = true;
                 CustomMapsPlugin.StaticLogger.LogInfo(
                     $"Custom Maps: SetUplinkNumber (post) — enabled child[{number}] renderers.");
@@ -1168,9 +1271,9 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(LobbyUIManager), "UserCode_RpcSetMapSelected")]
     public class RpcMapSelectedPatch
     {
-        static int lastMap = -1; // suppress per-frame log spam
+        private static int lastMap = -1; // suppress per-frame log spam
 
-        static void Postfix(int map)
+        private static void Postfix(int map)
         {
             // Always store the raw index BEFORE the dedup check so LobbyStartPatch
             // can backfill pendingBundle if builtinMapCount was 0 when this first fired.
@@ -1207,56 +1310,49 @@ namespace CustomMapsMod
     [HarmonyPatch(typeof(Player), "GoToSpawn")]
     public class GoToSpawnPatch
     {
-        static void Postfix(Player __instance)
+        private static bool teamReadErrorLogged = false;
+
+        private static void Postfix(Player __instance)
         {
             if (CustomMapsPlugin.activeMapGeo == null) return;
 
-            // Read the player's team (1 or 2) via the public Human.Team property.
+            // Read the player's team (1 or 2) via the cached PropertyInfo —
+            // resolving it with GetProperty() on every spawn was wasted work.
             int team = 0;
             try
             {
-                var teamProp = typeof(Human).GetProperty(
-                    "Team", BindingFlags.Public | BindingFlags.Instance);
-                if (teamProp != null) team = (int)teamProp.GetValue(__instance);
+                if (CustomMapsPlugin.HumanTeamProperty != null)
+                    team = (int)CustomMapsPlugin.HumanTeamProperty.GetValue(__instance);
             }
-            catch { }
-
-            // Collect spawn positions for this team from the custom map geometry.
-            string teamPrefix = team == 2 ? "T2Spawn" : "T1Spawn";
-            var positions = new List<Vector3>();
-            foreach (Transform t in CustomMapsPlugin.activeMapGeo
-                .GetComponentsInChildren<Transform>(true))
+            catch (Exception ex)
             {
-                if (t.name.StartsWith(teamPrefix, StringComparison.OrdinalIgnoreCase))
-                    positions.Add(t.position);
-            }
-
-            // Fall back to any spawn in the map if the team-specific list is empty.
-            if (positions.Count == 0)
-            {
-                foreach (Transform t in CustomMapsPlugin.activeMapGeo
-                    .GetComponentsInChildren<Transform>(true))
+                if (!teamReadErrorLogged)
                 {
-                    if (t.name.StartsWith("T1Spawn", StringComparison.OrdinalIgnoreCase) ||
-                        t.name.StartsWith("T2Spawn", StringComparison.OrdinalIgnoreCase))
-                        positions.Add(t.position);
+                    teamReadErrorLogged = true;
+                    CustomMapsPlugin.StaticLogger.LogWarning(
+                        $"Custom Maps: Could not read player team: {ex.Message}");
                 }
             }
 
-            if (positions.Count == 0) return; // no spawns found — leave where original put them
+            // Spawn positions come from a per-map cache built on first use —
+            // previously this scanned every Transform in the map geometry (twice,
+            // when the team-specific list was empty) on every single spawn.
+            // The cache handles the fall-back-to-other-team case internally.
+            List<Vector3> positions = CustomMapsPlugin.GetCachedSpawnPositions(team);
+
+            if (positions == null || positions.Count == 0) return; // no spawns found — leave where original put them
 
             Vector3 spawnPos = positions[UnityEngine.Random.Range(0, positions.Count)];
 
             // Teleport — disable CharacterController first to avoid physics conflicts.
-            var cc = __instance.GetComponent<CharacterController>();
+            CharacterController cc = __instance.GetComponent<CharacterController>();
             if (cc != null) cc.enabled = false;
             __instance.transform.position = spawnPos;
             if (cc != null) cc.enabled = true;
 
             CustomMapsPlugin.StaticLogger.LogInfo(
-                $"Custom Maps: GoToSpawnPatch — team={team} prefix={teamPrefix}" +
+                $"Custom Maps: GoToSpawnPatch — team={team}" +
                 $" candidates={positions.Count} → {spawnPos}.");
         }
     }
-
 }
