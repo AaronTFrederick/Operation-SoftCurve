@@ -3,12 +3,10 @@ using BepInEx.Configuration;
 using UnityEngine;
 using UnityEngine.UI;
 using Mirror;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace HostKickMod
 {
-    [BepInPlugin("com.peakzelo.hostkickmod", "Host Kick and Crosshair Mod", "3.0.0")]
+    [BepInPlugin("com.peakzelo.hostkickmod", "Host Kick and Crosshair Mod", "3.0.1")]
     [BepInProcess("Project Hardline.exe")]
     public class HostKickMod : BaseUnityPlugin
     {
@@ -19,11 +17,11 @@ namespace HostKickMod
         // Kick Menu
         private bool showKickMenu = false;
         private Vector2 scrollPosition = Vector2.zero;
-        private Rect windowRect = new Rect(20, 20, 300, 400);
+        private Rect windowRect = new(20, 20, 300, 400);
 
         // Crosshair Menu
         private bool showCrosshairMenu = false;
-        private Rect crosshairWindowRect = new Rect(350, 20, 350, 500);
+        private Rect crosshairWindowRect = new(350, 20, 350, 500);
 
         // Crosshair Settings (will be loaded from config)
         private bool customCrosshairEnabled;
@@ -177,8 +175,10 @@ namespace HostKickMod
             }
 
             // Mod credit in top right corner
-            GUIStyle creditStyle = new GUIStyle(GUI.skin.label);
-            creditStyle.fontSize = 10;
+            GUIStyle creditStyle = new(GUI.skin.label)
+            {
+                fontSize = 10
+            };
             creditStyle.normal.textColor = new Color(1f, 1f, 1f, 0.5f); // Semi-transparent white
             creditStyle.alignment = TextAnchor.UpperRight;
             GUI.Label(new Rect(Screen.width - 120, 5, 110, 20), "Mod by PeakZelo", creditStyle);
@@ -187,21 +187,27 @@ namespace HostKickMod
         private void InitializeStyles()
         {
             // Button style
-            buttonStyle = new GUIStyle(GUI.skin.button);
-            buttonStyle.fontSize = 14;
-            buttonStyle.padding = new RectOffset(10, 10, 5, 5);
+            buttonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 14,
+                padding = new RectOffset(10, 10, 5, 5)
+            };
             buttonStyle.normal.textColor = Color.white;
             buttonStyle.hover.textColor = Color.red;
 
             // Window style
-            windowStyle = new GUIStyle(GUI.skin.window);
-            windowStyle.fontSize = 16;
-            windowStyle.fontStyle = FontStyle.Bold;
+            windowStyle = new GUIStyle(GUI.skin.window)
+            {
+                fontSize = 16,
+                fontStyle = FontStyle.Bold
+            };
 
             // Label style
-            labelStyle = new GUIStyle(GUI.skin.label);
-            labelStyle.fontSize = 12;
-            labelStyle.fontStyle = FontStyle.Bold;
+            labelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                fontStyle = FontStyle.Bold
+            };
             labelStyle.normal.textColor = Color.yellow;
 
             stylesInitialized = true;
@@ -382,7 +388,7 @@ namespace HostKickMod
 
         private void DrawCustomCrosshair()
         {
-            Vector2 center = new Vector2(Screen.width / 2f, Screen.height / 2f);
+            Vector2 center = new(Screen.width / 2f, Screen.height / 2f);
 
             switch (crosshairStyle)
             {
@@ -472,12 +478,12 @@ namespace HostKickMod
                 float angle1 = (i / (float)segments) * 2f * Mathf.PI;
                 float angle2 = ((i + 1) / (float)segments) * 2f * Mathf.PI;
 
-                Vector2 p1 = new Vector2(
+                Vector2 p1 = new(
                     center.x + Mathf.Cos(angle1) * radius,
                     center.y + Mathf.Sin(angle1) * radius
                 );
 
-                Vector2 p2 = new Vector2(
+                Vector2 p2 = new(
                     center.x + Mathf.Cos(angle2) * radius,
                     center.y + Mathf.Sin(angle2) * radius
                 );
