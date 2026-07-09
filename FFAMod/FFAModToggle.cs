@@ -1,106 +1,108 @@
 using BepInEx;
 using BepInEx.Logging;
-using UnityEngine;
-using UnityEngine.UI;
-using Mirror;
+using HarmonyLib;
+using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using HarmonyLib;
+using System.Drawing;
+using UnityEngine;
+using UnityEngine.UI;
+using Color = UnityEngine.Color;
+using FontStyle = UnityEngine.FontStyle;
+using Object = UnityEngine.Object;
 
 namespace FFAMod
 {
-    [BepInPlugin("com.peakzelo.ffamod", "Free For All Mode Toggle", "4.6.7")]
-    // Removed BepInProcess so it works on both Windows and Mac
+    [BepInPlugin("com.peakzelo.ffamod", "Free For All Mode Toggle", "4.6.9")]
     public class FFAModToggle : BaseUnityPlugin
     {
-
         // Track used spawn positions to prevent spawning on top of each other
-        private static List<Transform> usedSpawnPositions = new List<Transform>();
-        private static Dictionary<Vector3, float> activeSpawnPositions = new Dictionary<Vector3, float>(); // Track positions with timestamp
+        private static List<Transform> usedSpawnPositions = [];
+        private static Dictionary<Vector3, float> activeSpawnPositions = []; // Track positions with timestamp
         private static float spawnPositionTimeout = 5f; // Time before a spawn position becomes available again
         private static bool isResettingSpawns = false;
-        private static System.Random spawnRandom = new System.Random(); // Use System.Random for better distribution
-        private static object spawnLock = new object(); // Thread safety for spawn selection
+        private static System.Random spawnRandom = new(); // Use System.Random for better distribution
+        private static object spawnLock = new(); // Thread safety for spawn selection
+        private static readonly List<Vector3> expiredPositions = []; // Reused scratch list
 
         // FFA weapon tier progression - increases every 2 completed rounds
         private static int ffaCompletedRounds = 0;
 
         // Custom spawn points for specific maps (collected via F6)
-        private static Dictionary<string, List<Vector3>> customMapSpawns = new Dictionary<string, List<Vector3>>()
+        private static Dictionary<string, List<Vector3>> customMapSpawns = new()
         {
             {
                 "level1", new List<Vector3>()  // Compound map
                 {
-                    new Vector3(264.7566f, 11.62088f, 413.8766f),
-                    new Vector3(254.5119f, 8.373138f, 426.4711f),
-                    new Vector3(218.5967f, 13.9926f, 408.3055f),
-                    new Vector3(293.7034f, 7.67872f, 399.9081f),
-                    new Vector3(312.255f, 4.505035f, 450.6898f),
-                    new Vector3(266.6603f, 7.914889f, 421.6767f)
+                    new(264.7566f, 11.62088f, 413.8766f),
+                    new(254.5119f, 8.373138f, 426.4711f),
+                    new(218.5967f, 13.9926f, 408.3055f),
+                    new(293.7034f, 7.67872f, 399.9081f),
+                    new(312.255f, 4.505035f, 450.6898f),
+                    new(266.6603f, 7.914889f, 421.6767f)
                 }
             },
             {
                 "level2", new List<Vector3>()  // Shipyard map
                 {
-                    new Vector3(21.39629f, -0.5049999f, 39.26278f),
-                    new Vector3(-0.2652665f, -0.5049999f, 39.50876f),
-                    new Vector3(-15.00573f, -0.505f, 24.28817f),
-                    new Vector3(-14.34395f, -0.4006001f, 4.500097f),
-                    new Vector3(-5.939525f, -0.505f, 21.87281f),
-                    new Vector3(17.99793f, -0.3616391f, 17.14673f)
+                    new(21.39629f, -0.5049999f, 39.26278f),
+                    new(-0.2652665f, -0.5049999f, 39.50876f),
+                    new(-15.00573f, -0.505f, 24.28817f),
+                    new(-14.34395f, -0.4006001f, 4.500097f),
+                    new(-5.939525f, -0.505f, 21.87281f),
+                    new(17.99793f, -0.3616391f, 17.14673f)
                 }
             },
             {
                 "level3", new List<Vector3>()  // Level 3 map
                 {
-                    new Vector3(-2.997097f, 3.406296f, 36.16267f),
-                    new Vector3(-22.42639f, 3.406297f, 28.62449f),
-                    new Vector3(-12.86422f, 3.406299f, 16.55714f),
-                    new Vector3(-42.06099f, 3.406301f, 2.713515f),
-                    new Vector3(-43.00544f, 3.406298f, 23.95444f),
-                    new Vector3(-29.67885f, 3.406295f, 42.39952f),
-                    new Vector3(-43.28857f, 0.1062984f, 16.08615f),
-                    new Vector3(-33.97502f, 0.1063007f, 3.545799f),
-                    new Vector3(-23.4622f, 0.1063006f, 2.751948f),
-                    new Vector3(-26.08475f, 0.106297f, 25.8184f),
-                    new Vector3(-16.96184f, 0.1062959f, 32.29234f),
-                    new Vector3(-4.005488f, 0.1062943f, 42.25777f),
-                    new Vector3(-3.115857f, 0.1062964f, 28.70715f)
+                    new(-2.997097f, 3.406296f, 36.16267f),
+                    new(-22.42639f, 3.406297f, 28.62449f),
+                    new(-12.86422f, 3.406299f, 16.55714f),
+                    new(-42.06099f, 3.406301f, 2.713515f),
+                    new(-43.00544f, 3.406298f, 23.95444f),
+                    new(-29.67885f, 3.406295f, 42.39952f),
+                    new(-43.28857f, 0.1062984f, 16.08615f),
+                    new(-33.97502f, 0.1063007f, 3.545799f),
+                    new(-23.4622f, 0.1063006f, 2.751948f),
+                    new(-26.08475f, 0.106297f, 25.8184f),
+                    new(-16.96184f, 0.1062959f, 32.29234f),
+                    new(-4.005488f, 0.1062943f, 42.25777f),
+                    new(-3.115857f, 0.1062964f, 28.70715f)
                 }
             },
             {
                 "level4", new List<Vector3>()  // Level 4 map
                 {
-                    new Vector3(399.0235f, 11.57107f, 455.9523f),
-                    new Vector3(372.2059f, 5.441811f, 519.1681f),
-                    new Vector3(372.2074f, 15.09752f, 570.8201f),
-                    new Vector3(300.5229f, 18.79935f, 539.171f),
-                    new Vector3(318.6195f, 15.108f, 508.1286f),
-                    new Vector3(324.0158f, 14.94996f, 496.7177f),
-                    new Vector3(333.5532f, 15.11f, 483.7884f),
-                    new Vector3(304.7079f, 13.08234f, 444.0976f),
-                    new Vector3(230.6507f, 8.836293f, 475.3601f),
-                    new Vector3(248.1366f, 12.55542f, 476.2947f)
+                    new(399.0235f, 11.57107f, 455.9523f),
+                    new(372.2059f, 5.441811f, 519.1681f),
+                    new(372.2074f, 15.09752f, 570.8201f),
+                    new(300.5229f, 18.79935f, 539.171f),
+                    new(318.6195f, 15.108f, 508.1286f),
+                    new(324.0158f, 14.94996f, 496.7177f),
+                    new(333.5532f, 15.11f, 483.7884f),
+                    new(304.7079f, 13.08234f, 444.0976f),
+                    new(230.6507f, 8.836293f, 475.3601f),
+                    new(248.1366f, 12.55542f, 476.2947f)
                 }
             },
             {
                 "level5", new List<Vector3>()  // Level 5 map
                 {
-                    new Vector3(25.5104f, 30.02943f, -3.280473f),
-                    new Vector3(-6.63164f, 29.87868f, -8.156416f),
-                    new Vector3(-21.52309f, 30.04172f, -13.34181f),
-                    new Vector3(-3.265413f, 43.01818f, 4.558913f),
-                    new Vector3(-11.91967f, 45.60149f, -9.918157f),
-                    new Vector3(-15.9237f, 41.99507f, 19.20911f),
-                    new Vector3(6.455793f, 42.49228f, 2.657346f),
-                    new Vector3(14.45212f, 42.05228f, -8.067226f),
-                    new Vector3(9.320208f, 41.19827f, -34.16364f),
-                    new Vector3(-28.94631f, 41.83363f, -20.29543f)
+                    new(25.5104f, 30.02943f, -3.280473f),
+                    new(-6.63164f, 29.87868f, -8.156416f),
+                    new(-21.52309f, 30.04172f, -13.34181f),
+                    new(-3.265413f, 43.01818f, 4.558913f),
+                    new(-11.91967f, 45.60149f, -9.918157f),
+                    new(-15.9237f, 41.99507f, 19.20911f),
+                    new(6.455793f, 42.49228f, 2.657346f),
+                    new(14.45212f, 42.05228f, -8.067226f),
+                    new(9.320208f, 41.19827f, -34.16364f),
+                    new(-28.94631f, 41.83363f, -20.29543f)
                 }
             }
         };
-        private static List<Transform> customSpawnPoints = new List<Transform>();
+        private static List<Transform> customSpawnPoints = [];
         private static bool customSpawnsGenerated = false;
         private static string currentMapName = "";
 
@@ -111,18 +113,18 @@ namespace FFAMod
         // Local FFA mode toggle (each player controls their own)
         private static bool localFFAMode = false;
         private bool showFFAMenu = false;
-        private Rect ffaMenuRect = new Rect(Screen.width / 2 - 150, Screen.height / 2 - 100, 300, 220);
+        private Rect ffaMenuRect = new(Screen.width / 2 - 150, Screen.height / 2 - 100, 300, 220);
 
         // Gun Game mode
         private static bool gunGameMode = false;
-        private static Dictionary<uint, int> gunGamePlayerLevel = new Dictionary<uint, int>(); // netId -> weapon level
-        private static Dictionary<uint, float> gunGameDeathTimes = new Dictionary<uint, float>(); // netId -> death time
+        private static Dictionary<uint, int> gunGamePlayerLevel = []; // netId -> weapon level
+        private static Dictionary<uint, float> gunGameDeathTimes = []; // netId -> death time
         private static float gunGameRespawnDelay = 3f; // Seconds before respawning dead players
 
         // SERVER-SIDE Gun Game tracking (for win detection when clients win)
         // The server tracks kills/demotions independently so it can detect when ANY player wins
-        private static Dictionary<uint, int> serverGunGameKills = new Dictionary<uint, int>();
-        private static Dictionary<uint, int> serverGunGameDemotions = new Dictionary<uint, int>();
+        private static Dictionary<uint, int> serverGunGameKills = [];
+        private static Dictionary<uint, int> serverGunGameDemotions = [];
         private static bool gunGameEnded = false; // Prevent double-win calls
 
         // Track last kill info for knife demotion (set in HitAnotherTarget, read in AddKill)
@@ -135,14 +137,17 @@ namespace FFAMod
             gunGameLastKillWasKnife = wasKnife;
         }
 
-        public static Human GetLastKillTarget() { return gunGameLastKillTarget; }
-        public static bool WasLastKillKnife() { return gunGameLastKillWasKnife; }
-        public static void ClearLastKillInfo() { gunGameLastKillTarget = null; gunGameLastKillWasKnife = false; }
+        public static Human GetLastKillTarget()
+        { return gunGameLastKillTarget; }
+        public static bool WasLastKillKnife()
+        { return gunGameLastKillWasKnife; }
+        public static void ClearLastKillInfo()
+        { gunGameLastKillTarget = null; gunGameLastKillWasKnife = false; }
 
         // Gun Game weapon progression (0 = pistol, final = knife)
         // NOTE: LoadItem adds "Weapon_" prefix automatically, so just use the base name
-        private static List<string> gunGameWeapons = new List<string>()
-        {
+        private static List<string> gunGameWeapons =
+        [
             "Glock",        // Level 0 - Pistol
             "M45",          // Level 1 - Pistol 2
             "X22",          // Level 2 - Machine Pistol
@@ -157,14 +162,14 @@ namespace FFAMod
             "Scout",        // Level 11 - Sniper
             "M24",          // Level 12 - Sniper 2
             "Knife"         // Level 13 - FINAL (get a kill to win)
-        };
+        ];
 
         // FFA team assignment system - use player names as keys for persistence
-        private static Dictionary<string, int> ffaPlayerTeams = new Dictionary<string, int>();
+        private static Dictionary<string, int> ffaPlayerTeams = [];
 
         // MOD-SIDE FFA score tracking (by player name, not netId)
         // This fixes the issue where the game's score display always shows 1/5
-        private static Dictionary<string, int> modFFAScores = new Dictionary<string, int>();
+        private static Dictionary<string, int> modFFAScores = [];
 
         // Keybind configuration
         private static KeyCode ffaMenuKey = KeyCode.F7;
@@ -172,18 +177,69 @@ namespace FFAMod
         private static KeyCode keybindMenuKey = KeyCode.F5;
 
         private bool showKeybindMenu = false;
-        private Rect keybindMenuRect = new Rect(Screen.width / 2 - 200, Screen.height / 2 - 200, 400, 400);
+        private Rect keybindMenuRect = new(Screen.width / 2 - 200, Screen.height / 2 - 200, 400, 400);
         private bool isWaitingForKey = false;
         private string keyToRebind = "";
 
         private Harmony harmony;
+
+        // ==================== CACHED LOOKUPS (perf) ====================
+        // FindObjectsOfType/FindObjectOfType are expensive; cache results and only
+        // re-search when the cached reference dies (scene change, despawn), with a
+        // small cooldown so a missing object doesn't trigger a full scan every frame.
+        private const float ObjectSearchCooldown = 0.5f;
+
+        private static Player cachedLocalPlayer;
+        private static float nextLocalPlayerSearch;
+        private static RoundsHardlineGameManager cachedGameManager;
+        private static float nextGameManagerSearch;
+
+        // Enum.GetValues allocates a new array every call - cache it once
+        private static readonly KeyCode[] AllKeyCodes =
+            (KeyCode[])System.Enum.GetValues(typeof(KeyCode));
+
+        public static Player GetLocalPlayer()
+        {
+            // Unity's overloaded == returns true for destroyed objects
+            if (cachedLocalPlayer != null) return cachedLocalPlayer;
+            if (Time.unscaledTime < nextLocalPlayerSearch) return null;
+            nextLocalPlayerSearch = Time.unscaledTime + ObjectSearchCooldown;
+
+            foreach (Player p in FindObjectsOfType<Player>())
+            {
+                if (p.hasAuthority)
+                {
+                    cachedLocalPlayer = p;
+                    break;
+                }
+            }
+            return cachedLocalPlayer;
+        }
+
+        public static RoundsHardlineGameManager GetGameManager()
+        {
+            if (cachedGameManager != null) return cachedGameManager;
+            if (Time.unscaledTime < nextGameManagerSearch) return null;
+            nextGameManagerSearch = Time.unscaledTime + ObjectSearchCooldown;
+
+            cachedGameManager = FindObjectOfType<RoundsHardlineGameManager>();
+            return cachedGameManager;
+        }
+
+        private static void ClearObjectCaches()
+        {
+            cachedLocalPlayer = null;
+            cachedGameManager = null;
+            nextLocalPlayerSearch = 0f;
+            nextGameManagerSearch = 0f;
+        }
 
         private void Awake()
         {
             StaticLogger = Logger;
             Instance = this;
             Logger.LogInfo("Free For All Mode Toggle initialized!");
-            Logger.LogInfo("FFA Mod v4.6.7 - Fixed rainbow name overwriting FFA score");
+            Logger.LogInfo("FFA Mod v4.6.9 - Performance pass (cached lookups, rainbow removal, GUI styles)");
             Logger.LogInfo("Applying Harmony patches...");
 
             // Apply Harmony patches
@@ -191,9 +247,6 @@ namespace FFAMod
             harmony.PatchAll();
 
             Logger.LogInfo("Harmony patches applied successfully!");
-
-            // Start rainbow name scanning coroutine
-            StartCoroutine(RainbowNameScanCoroutine());
         }
 
         private void OnDestroy()
@@ -215,6 +268,9 @@ namespace FFAMod
             customSpawnsGenerated = false;
             customSpawnPoints.Clear();
 
+            // Cached object references belong to the old scene
+            ClearObjectCaches();
+
             // Reset FFA completed rounds counter when map changes
             ResetFFACompletedRounds();
         }
@@ -226,7 +282,7 @@ namespace FFAMod
             {
                 if (Input.anyKeyDown)
                 {
-                    foreach (KeyCode keyCode in System.Enum.GetValues(typeof(KeyCode)))
+                    foreach (KeyCode keyCode in AllKeyCodes)
                     {
                         if (Input.GetKeyDown(keyCode))
                         {
@@ -257,16 +313,8 @@ namespace FFAMod
             // Log current player position for spawn collection
             if (Input.GetKeyDown(logSpawnKey))
             {
-                // Find local player
-                Player localPlayer = null;
-                foreach (Player p in FindObjectsOfType<Player>())
-                {
-                    if (p.hasAuthority)
-                    {
-                        localPlayer = p;
-                        break;
-                    }
-                }
+                // Find local player (cached)
+                Player localPlayer = GetLocalPlayer();
 
                 if (localPlayer != null)
                 {
@@ -284,29 +332,114 @@ namespace FFAMod
             }
         }
 
+        // Cached GUI styles - OnGUI runs several times per frame, so building
+        // GUIStyles (and interpolated label strings) inside it allocates constantly.
+        private static GUIStyle statusOnStyle;
+        private static GUIStyle statusOffStyle;
+        private static GUIStyle menuLabelStyle;
+        private static GUIStyle menuButtonStyle;
+        private static GUIStyle menuStatusStyle;
+        private static GUIStyle keybindTitleStyle;
+        private static GUIStyle keybindWaitStyle;
+        private static GUIStyle keybindLabelStyle;
+        private static GUIStyle keybindButtonStyle;
+        private static bool guiStylesInitialized = false;
+
+        // Cached status label strings - rebuilt only when a key is rebound
+        private static string statusOnLabel;
+        private static string statusOffLabel;
+
+        private static void RefreshStatusLabels()
+        {
+            statusOnLabel = $"FFA MODE: ENABLED ({ffaMenuKey})";
+            statusOffLabel = $"Press {ffaMenuKey} for FFA Mode | {keybindMenuKey} for Keybinds";
+        }
+
+        private static void InitializeGUIStyles()
+        {
+            statusOnStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.UpperLeft
+            };
+            statusOnStyle.normal.textColor = Color.green;
+
+            statusOffStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                alignment = TextAnchor.UpperLeft
+            };
+            statusOffStyle.normal.textColor = Color.yellow;
+
+            menuLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true
+            };
+
+            menuButtonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 14,
+                padding = new RectOffset(10, 10, 10, 10)
+            };
+
+            menuStatusStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 11,
+                alignment = TextAnchor.MiddleCenter
+            };
+            menuStatusStyle.normal.textColor = Color.yellow;
+
+            keybindTitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 16,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter
+            };
+
+            keybindWaitStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true
+            };
+            keybindWaitStyle.normal.textColor = Color.yellow;
+
+            keybindLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 13,
+                alignment = TextAnchor.MiddleLeft
+            };
+
+            keybindButtonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 12
+            };
+
+            RefreshStatusLabels();
+            guiStylesInitialized = true;
+        }
+
         private void OnGUI()
         {
             try
             {
+                // GUIStyles must be built inside OnGUI (GUI.skin access), but only once
+                if (!guiStylesInitialized)
+                {
+                    InitializeGUIStyles();
+                }
+
                 // Show FFA mode status in corner
                 if (localFFAMode)
                 {
-                    GUIStyle statusStyle = new GUIStyle(GUI.skin.label);
-                    statusStyle.fontSize = 14;
-                    statusStyle.fontStyle = FontStyle.Bold;
-                    statusStyle.normal.textColor = Color.green;
-                    statusStyle.alignment = TextAnchor.UpperLeft;
-
-                    GUI.Label(new Rect(10, 60, 300, 25), $"FFA MODE: ENABLED ({ffaMenuKey})", statusStyle);
+                    GUI.Label(new Rect(10, 60, 300, 25), statusOnLabel, statusOnStyle);
                 }
                 else
                 {
-                    GUIStyle statusStyle = new GUIStyle(GUI.skin.label);
-                    statusStyle.fontSize = 12;
-                    statusStyle.normal.textColor = Color.yellow;
-                    statusStyle.alignment = TextAnchor.UpperLeft;
-
-                    GUI.Label(new Rect(10, 60, 300, 25), $"Press {ffaMenuKey} for FFA Mode | {keybindMenuKey} for Keybinds", statusStyle);
+                    GUI.Label(new Rect(10, 60, 300, 25), statusOffLabel, statusOffStyle);
                 }
 
                 // Show FFA toggle menu
@@ -333,19 +466,14 @@ namespace FFAMod
 
             GUILayout.Space(10);
 
-            GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
-            labelStyle.fontSize = 14;
-            labelStyle.alignment = TextAnchor.MiddleCenter;
-            labelStyle.wordWrap = true;
+            GUIStyle labelStyle = menuLabelStyle;
 
             GUILayout.Label("Select Game Mode", labelStyle);
 
             GUILayout.Space(10);
 
-            // Button style
-            GUIStyle buttonStyle = new GUIStyle(GUI.skin.button);
-            buttonStyle.fontSize = 14;
-            buttonStyle.padding = new RectOffset(10, 10, 10, 10);
+            // Button style (cached)
+            GUIStyle buttonStyle = menuButtonStyle;
 
             Color originalColor = GUI.backgroundColor;
 
@@ -407,11 +535,8 @@ namespace FFAMod
 
             GUILayout.Space(10);
 
-            // Show current mode status
-            GUIStyle statusStyle = new GUIStyle(GUI.skin.label);
-            statusStyle.fontSize = 11;
-            statusStyle.alignment = TextAnchor.MiddleCenter;
-            statusStyle.normal.textColor = Color.yellow;
+            // Show current mode status (cached style)
+            GUIStyle statusStyle = menuStatusStyle;
 
             if (gunGameMode)
             {
@@ -444,25 +569,14 @@ namespace FFAMod
 
             GUILayout.Space(10);
 
-            GUIStyle titleStyle = new GUIStyle(GUI.skin.label);
-            titleStyle.fontSize = 16;
-            titleStyle.fontStyle = FontStyle.Bold;
-            titleStyle.alignment = TextAnchor.MiddleCenter;
-
-            GUILayout.Label("Configure Keybinds", titleStyle);
+            GUILayout.Label("Configure Keybinds", keybindTitleStyle);
 
             GUILayout.Space(15);
 
             // Status message when waiting for key
             if (isWaitingForKey)
             {
-                GUIStyle waitStyle = new GUIStyle(GUI.skin.label);
-                waitStyle.fontSize = 14;
-                waitStyle.normal.textColor = Color.yellow;
-                waitStyle.alignment = TextAnchor.MiddleCenter;
-                waitStyle.wordWrap = true;
-
-                GUILayout.Label("Press any key to bind...\n(ESC to cancel)", waitStyle);
+                GUILayout.Label("Press any key to bind...\n(ESC to cancel)", keybindWaitStyle);
                 GUILayout.Space(10);
 
                 if (Input.GetKeyDown(KeyCode.Escape))
@@ -473,12 +587,8 @@ namespace FFAMod
                 }
             }
 
-            GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
-            labelStyle.fontSize = 13;
-            labelStyle.alignment = TextAnchor.MiddleLeft;
-
-            GUIStyle buttonStyle = new GUIStyle(GUI.skin.button);
-            buttonStyle.fontSize = 12;
+            GUIStyle labelStyle = keybindLabelStyle;
+            GUIStyle buttonStyle = keybindButtonStyle;
 
             // FFA Menu keybind
             GUILayout.BeginHorizontal();
@@ -522,17 +632,6 @@ namespace FFAMod
             }
             GUILayout.EndHorizontal();
 
-            GUILayout.Space(10);
-
-            // Crosshair Menu keybind
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Crosshair Menu:", labelStyle, GUILayout.Width(180));
-            if (GUILayout.Button($"[{HostKickMod.HostKickMod.crosshairMenuKey}]", buttonStyle, GUILayout.Width(100), GUILayout.Height(30)))
-            {
-                StartRebind("crosshairMenu");
-            }
-            GUILayout.EndHorizontal();
-
             GUILayout.Space(20);
 
             // Close button
@@ -550,56 +649,9 @@ namespace FFAMod
         private static float lastTimerValue = -1f;
         private static bool hasRespawnedThisRound = false;
 
-        // Helper to strip color tags from rainbow-formatted text
-        private static string StripColorTags(string text)
-        {
-            return System.Text.RegularExpressions.Regex.Replace(text, @"<color=#[A-Fa-f0-9]{6}>|</color>", "");
-        }
-
         // Hook into the game's spawn system to ensure unique spawn positions
         private void LateUpdate()
         {
-            // ===== RAINBOW NAME UPDATE (runs every frame to prevent flicker) =====
-            rainbowHue = (rainbowHue + rainbowSpeed * Time.deltaTime) % 1f;
-            try
-            {
-                var deadIds = new List<int>();
-                foreach (var kvp in rainbowTrackedById)
-                {
-                    int id = kvp.Key;
-                    Text textComp = kvp.Value;
-                    if (textComp == null)
-                    {
-                        deadIds.Add(id);
-                        continue;
-                    }
-                    // Get current text and strip any existing rainbow formatting
-                    // This allows other systems (like FFA score fix) to update the text
-                    // without being overwritten by cached original
-                    string currentText = textComp.text;
-                    string plainText = currentText.Contains("<color=") ? StripColorTags(currentText) : currentText;
-
-                    // Apply rainbow to the current plain text (not cached original)
-                    if (plainText.Contains(RAINBOW_USERNAME + " (dev)"))
-                    {
-                        // Already has (dev) suffix, just update rainbow colors
-                        textComp.text = plainText.Replace(RAINBOW_USERNAME + " (dev)", MakeRainbowText(RAINBOW_USERNAME + " (dev)"));
-                    }
-                    else if (plainText.Contains(RAINBOW_USERNAME))
-                    {
-                        // First time seeing this text, add (dev) suffix
-                        textComp.text = plainText.Replace(RAINBOW_USERNAME, MakeRainbowText(RAINBOW_USERNAME + " (dev)"));
-                    }
-                }
-                foreach (int id in deadIds)
-                {
-                    rainbowTrackedById.Remove(id);
-                    rainbowOriginalById.Remove(id);
-                }
-            }
-            catch (System.Exception) { }
-            // ===== END RAINBOW NAME UPDATE =====
-
             // Handle Gun Game mode separately from FFA
             if (!localFFAMode && !gunGameMode)
             {
@@ -619,16 +671,8 @@ namespace FFAMod
                     LobbyUIManager.isFreeForAllMode = true;
                 }
 
-                // Find local player (the one we have authority over)
-                Player localPlayer = null;
-                foreach (Player p in FindObjectsOfType<Player>())
-                {
-                    if (p.hasAuthority)
-                    {
-                        localPlayer = p;
-                        break;
-                    }
-                }
+                // Find local player (cached - no per-frame FindObjectsOfType)
+                Player localPlayer = GetLocalPlayer();
 
                 if (localPlayer != null)
                 {
@@ -665,8 +709,8 @@ namespace FFAMod
                     }
                 }
 
-                // Manage spawn position tracking
-                RoundsHardlineGameManager gm = FindObjectOfType<RoundsHardlineGameManager>();
+                // Manage spawn position tracking (cached lookup)
+                RoundsHardlineGameManager gm = GetGameManager();
                 if (gm != null && gm.RoundEndFlag && !isResettingSpawns)
                 {
                     isResettingSpawns = true;
@@ -681,7 +725,7 @@ namespace FFAMod
             }
 
             // Check if we need to reset spawn tracking (new round starting)
-            RoundsHardlineGameManager gameManager = FindObjectOfType<RoundsHardlineGameManager>();
+            RoundsHardlineGameManager gameManager = GetGameManager();
             if (gameManager != null)
             {
                 // Make sure the FFA flag stays set on ALL clients
@@ -694,17 +738,8 @@ namespace FFAMod
                 // CLIENT-SIDE: Detect when we need to respawn by watching timer transitions
                 if (!gameManager.isServer)
                 {
-                    Player localPlayer = null;
-
-                    // Find local player
-                    foreach (Player p in FindObjectsOfType<Player>())
-                    {
-                        if (p.hasAuthority)
-                        {
-                            localPlayer = p;
-                            break;
-                        }
-                    }
+                    // Find local player (cached)
+                    Player localPlayer = GetLocalPlayer();
 
                     if (localPlayer != null)
                     {
@@ -743,7 +778,6 @@ namespace FFAMod
             }
         }
 
-
         // Generate custom spawn points for specific maps
         private static void GenerateCustomSpawns()
         {
@@ -761,7 +795,7 @@ namespace FFAMod
 
                 for (int i = 0; i < positions.Count; i++)
                 {
-                    GameObject customSpawn = new GameObject($"CustomFFASpawn_{currentMapName}_{i}");
+                    GameObject customSpawn = new($"CustomFFASpawn_{currentMapName}_{i}");
                     customSpawn.transform.position = positions[i];
                     customSpawn.transform.rotation = Quaternion.Euler(0, UnityEngine.Random.Range(0f, 360f), 0);
                     DontDestroyOnLoad(customSpawn);
@@ -787,7 +821,7 @@ namespace FFAMod
             }
 
             // Collect all available spawn points
-            List<Transform> allSpawns = new List<Transform>();
+            List<Transform> allSpawns = [];
 
             // Add team 1 spawns
             if (gameManager.Team1Spawns != null)
@@ -902,7 +936,7 @@ namespace FFAMod
             lock (spawnLock)
             {
                 // Filter out spawns that are currently occupied by another player
-                List<Transform> availableSpawns = new List<Transform>();
+                List<Transform> availableSpawns = [];
                 foreach (Transform spawn in allSpawns)
                 {
                     if (!IsSpawnPositionOccupied(spawn.position))
@@ -929,9 +963,7 @@ namespace FFAMod
                 for (int i = availableSpawns.Count - 1; i > 0; i--)
                 {
                     int j = spawnRandom.Next(i + 1);
-                    Transform temp = availableSpawns[i];
-                    availableSpawns[i] = availableSpawns[j];
-                    availableSpawns[j] = temp;
+                    (availableSpawns[j], availableSpawns[i]) = (availableSpawns[i], availableSpawns[j]);
                 }
 
                 // Pick the first spawn after shuffle (more random than Range)
@@ -964,8 +996,7 @@ namespace FFAMod
 
             // Use Physics.Raycast to check if there's ground below the spawn point
             // This catches spawns floating in the air or outside the map
-            RaycastHit hit;
-            if (Physics.Raycast(pos + Vector3.up * 2f, Vector3.down, out hit, 10f))
+            if (Physics.Raycast(pos + Vector3.up * 2f, Vector3.down, out RaycastHit hit, 10f))
             {
                 // Found ground within 10 units below - this is good
                 StaticLogger.LogInfo($"Spawn validated: ground found {hit.distance}m below at {pos}");
@@ -985,8 +1016,8 @@ namespace FFAMod
             float currentTime = Time.time;
             float positionTolerance = 0.1f; // Positions within 0.1 units are considered the same
 
-            // Clean up expired spawn positions
-            List<Vector3> expiredPositions = new List<Vector3>();
+            // Clean up expired spawn positions (reused scratch list, no allocation)
+            expiredPositions.Clear();
             foreach (var kvp in activeSpawnPositions)
             {
                 if (currentTime - kvp.Value > spawnPositionTimeout)
@@ -1032,11 +1063,7 @@ namespace FFAMod
         // Get player's current Gun Game level
         public static int GetGunGameLevel(uint netId)
         {
-            if (gunGamePlayerLevel.ContainsKey(netId))
-            {
-                return gunGamePlayerLevel[netId];
-            }
-            return 0; // Start at level 0
+            return gunGamePlayerLevel.TryGetValue(netId, out int level) ? level : 0; // Start at level 0
         }
 
         // Set player's Gun Game level
@@ -1121,8 +1148,8 @@ namespace FFAMod
 
         public static int GetServerGunGameLevel(uint netId)
         {
-            int kills = serverGunGameKills.ContainsKey(netId) ? serverGunGameKills[netId] : 0;
-            int demotions = serverGunGameDemotions.ContainsKey(netId) ? serverGunGameDemotions[netId] : 0;
+            serverGunGameKills.TryGetValue(netId, out int kills);
+            serverGunGameDemotions.TryGetValue(netId, out int demotions);
             int level = kills - demotions;
             return System.Math.Max(0, System.Math.Min(level, GetGunGameMaxLevel()));
         }
@@ -1135,8 +1162,10 @@ namespace FFAMod
             StaticLogger.LogInfo("Gun Game: Reset server tracking");
         }
 
-        public static bool IsGunGameEnded() { return gunGameEnded; }
-        public static void SetGunGameEnded(bool ended) { gunGameEnded = ended; }
+        public static bool IsGunGameEnded()
+        { return gunGameEnded; }
+        public static void SetGunGameEnded(bool ended)
+        { gunGameEnded = ended; }
 
         // Fix inventory after Gun Game weapon change:
         // - Current weapon goes in primary slot (slot 1)
@@ -1185,7 +1214,7 @@ namespace FFAMod
         {
             string playerName = player.HumanName;
 
-            if (!ffaPlayerTeams.ContainsKey(playerName))
+            if (!ffaPlayerTeams.TryGetValue(playerName, out int existingTeam))
             {
                 // Use hash of player name to get consistent team number across all clients
                 int hash = playerName.GetHashCode();
@@ -1194,8 +1223,9 @@ namespace FFAMod
 
                 ffaPlayerTeams[playerName] = teamNumber;
                 StaticLogger.LogInfo($"FFA: Created new team {teamNumber} for {playerName} (hash-based)");
+                return teamNumber;
             }
-            return ffaPlayerTeams[playerName];
+            return existingTeam;
         }
 
         // Assign unique team to player in FFA mode
@@ -1242,7 +1272,7 @@ namespace FFAMod
 
         public static int GetModFFAScore(string playerName)
         {
-            return modFFAScores.ContainsKey(playerName) ? modFFAScores[playerName] : 0;
+            return modFFAScores.TryGetValue(playerName, out int score) ? score : 0;
         }
 
         public static string GetCurrentMapName()
@@ -1271,10 +1301,12 @@ namespace FFAMod
                     HostKickMod.HostKickMod.kickMenuKey = key;
                     Logger.LogInfo($"Host Kick Menu key set to: {key}");
                     break;
-                case "crosshairMenu":
-                    HostKickMod.HostKickMod.crosshairMenuKey = key;
-                    Logger.LogInfo($"Crosshair Menu key set to: {key}");
-                    break;
+            }
+
+            // Status labels embed keybind names - rebuild them after a rebind
+            if (guiStylesInitialized)
+            {
+                RefreshStatusLabels();
             }
         }
 
@@ -1284,69 +1316,13 @@ namespace FFAMod
             keyToRebind = bindName;
             Logger.LogInfo($"Waiting for new key for: {bindName}");
         }
-
-        // ==================== RAINBOW NAME SYSTEM FOR PeakZelo ====================
-        private static readonly string RAINBOW_USERNAME = "PeakZelo";
-        private static float rainbowHue = 0f;
-        private static float rainbowSpeed = 0.5f; // Full color cycle every 2 seconds
-
-        // Store Text component references and their original text for fast per-frame updates
-        private static Dictionary<int, Text> rainbowTrackedById = new Dictionary<int, Text>();
-        private static Dictionary<int, string> rainbowOriginalById = new Dictionary<int, string>();
-
-        public static string MakeRainbowText(string text, float hueOffset = 0f)
-        {
-            string result = "";
-            for (int i = 0; i < text.Length; i++)
-            {
-                float hue = (rainbowHue + hueOffset + (float)i / text.Length) % 1f;
-                Color color = Color.HSVToRGB(hue, 1f, 1f);
-                string hex = ColorUtility.ToHtmlStringRGB(color);
-                result += $"<color=#{hex}>{text[i]}</color>";
-            }
-            return result;
-        }
-
-        // Coroutine scans for NEW texts to track (runs less frequently to save CPU)
-        private IEnumerator RainbowNameScanCoroutine()
-        {
-            while (true)
-            {
-                yield return new WaitForSeconds(0.5f); // Scan every 0.5 seconds
-
-                try
-                {
-                    Text[] allTexts = FindObjectsOfType<Text>();
-
-                    foreach (var textComp in allTexts)
-                    {
-                        if (textComp == null) continue;
-                        int id = textComp.GetInstanceID();
-
-                        // Skip if already tracked
-                        if (rainbowTrackedById.ContainsKey(id)) continue;
-
-                        // Check if this text contains PeakZelo (with or without rainbow formatting)
-                        string plainText = textComp.text.Contains("<color=") ? StripColorTags(textComp.text) : textComp.text;
-                        if (!string.IsNullOrEmpty(plainText) && plainText.Contains(RAINBOW_USERNAME))
-                        {
-                            // Start tracking this text (no need to store original - we work on current text)
-                            rainbowTrackedById[id] = textComp;
-                            textComp.supportRichText = true;
-                            StaticLogger.LogInfo($"Rainbow: Now tracking text '{plainText}'");
-                        }
-                    }
-                }
-                catch (System.Exception) { }
-            }
-        }
     }
 
     // Harmony patch to override spawn position selection in FFA mode (RoundsHardlineGameManager)
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "GetSpawnPositionForTeam")]
     public class FFASpawnPatch
     {
-        static bool Prefix(RoundsHardlineGameManager __instance, ref Transform __result)
+        private static bool Prefix(RoundsHardlineGameManager __instance, ref Transform __result)
         {
             // Only intercept if local FFA mode is active
             if (!FFAModToggle.IsFFAModeActive())
@@ -1371,10 +1347,10 @@ namespace FFAMod
     [HarmonyPatch(typeof(HardlineGameManager), "GetSpawnPositionForTeam")]
     public class FFASpawnPatchBase
     {
-        static bool Prefix(HardlineGameManager __instance, ref Transform __result)
+        private static bool Prefix(HardlineGameManager __instance, ref Transform __result)
         {
             // Only intercept if local FFA mode is active and this is a RoundsHardlineGameManager
-            if (!FFAModToggle.IsFFAModeActive() || !(__instance is RoundsHardlineGameManager))
+            if (!FFAModToggle.IsFFAModeActive() || __instance is not RoundsHardlineGameManager)
             {
                 return true; // Let original method run
             }
@@ -1386,12 +1362,11 @@ namespace FFAMod
         }
     }
 
-
     // Patch GoToSpawn to assign unique teams in FFA and Gun Game
     [HarmonyPatch(typeof(Player), "GoToSpawn")]
     public class FFAGoToSpawnPatch
     {
-        static void Prefix(Player __instance)
+        private static void Prefix(Player __instance)
         {
             // Assign unique teams for both FFA and Gun Game
             // This lets all players damage each other (everyone vs everyone)
@@ -1405,7 +1380,7 @@ namespace FFAMod
             }
         }
 
-        static void Postfix(Player __instance)
+        private static void Postfix(Player __instance)
         {
             if (FFAModToggle.IsFFAModeActive())
             {
@@ -1419,7 +1394,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(HardlineGameManager), "RestartGameCharacter")]
     public class FFARestartCharacterPatch
     {
-        static void Prefix(HardlineGameManager __instance)
+        private static void Prefix(HardlineGameManager __instance)
         {
             if (FFAModToggle.IsFFAModeActive())
             {
@@ -1427,7 +1402,7 @@ namespace FFAMod
             }
         }
 
-        static void Postfix(HardlineGameManager __instance)
+        private static void Postfix(HardlineGameManager __instance)
         {
             if (FFAModToggle.IsFFAModeActive())
             {
@@ -1440,7 +1415,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "FFARoundWin")]
     public class FFARoundWinPatch
     {
-        static void Prefix(RoundsHardlineGameManager __instance, Human winner)
+        private static void Prefix(RoundsHardlineGameManager __instance, Human winner)
         {
             if (!FFAModToggle.IsFFAModeActive())
             {
@@ -1451,7 +1426,7 @@ namespace FFAMod
             FFAModToggle.IncrementFFACompletedRounds();
             FFAModToggle.StaticLogger.LogInfo($"FFA: Round completed. Total rounds: {FFAModToggle.GetFFACompletedRounds()}, Weapon tier: {FFAModToggle.GetFFAWeaponTier()}");
 
-            if (winner == null || !(winner is Player))
+            if (winner == null || winner is not Player)
             {
                 return;
             }
@@ -1466,9 +1441,9 @@ namespace FFAMod
             FFAModToggle.StaticLogger.LogInfo($"FFA: Winner={winningPlayer.HumanName}, netId={winningPlayer.netId}, isServer={__instance.isServer}");
         }
 
-        static void Postfix(RoundsHardlineGameManager __instance, Human winner)
+        private static void Postfix(RoundsHardlineGameManager __instance, Human winner)
         {
-            if (!FFAModToggle.IsFFAModeActive() || winner == null || !(winner is Player))
+            if (!FFAModToggle.IsFFAModeActive() || winner == null || winner is not Player)
             {
                 return;
             }
@@ -1482,8 +1457,7 @@ namespace FFAMod
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 if (ffaPlayerScoresField != null)
                 {
-                    var scores = ffaPlayerScoresField.GetValue(__instance) as Dictionary<uint, int>;
-                    if (scores != null)
+                    if (ffaPlayerScoresField.GetValue(__instance) is Dictionary<uint, int> scores)
                     {
                         FFAModToggle.StaticLogger.LogInfo($"FFA: Game scores after round:");
                         foreach (var kvp in scores)
@@ -1534,7 +1508,7 @@ namespace FFAMod
                             if (showNotificationMethod != null)
                             {
                                 string message = $"{winningPlayer.HumanName} wins the round! ({modScore}/{requiredWins})";
-                                showNotificationMethod.Invoke(gameUI, new object[] { message });
+                                showNotificationMethod.Invoke(gameUI, [message]);
                                 FFAModToggle.StaticLogger.LogInfo($"FFA SERVER: Showed corrected notification - {winningPlayer.HumanName} ({modScore}/{requiredWins})");
                             }
                         }
@@ -1552,7 +1526,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "GenerateRandomLoadout")]
     public class FFAGenerateRandomLoadoutPatch
     {
-        static void Prefix(ref int tier)
+        private static void Prefix(ref int tier)
         {
             if (!FFAModToggle.IsFFAModeActive())
             {
@@ -1570,7 +1544,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "UserCode_RpcFFARoundWin")]
     public class FFAUserCodeRpcFFARoundWinPatch
     {
-        static void Prefix(RoundsHardlineGameManager __instance, string winnerName, int score)
+        private static void Prefix(RoundsHardlineGameManager __instance, string winnerName, int score)
         {
             if (!FFAModToggle.IsFFAModeActive())
             {
@@ -1588,7 +1562,7 @@ namespace FFAMod
             }
         }
 
-        static void Postfix(RoundsHardlineGameManager __instance)
+        private static void Postfix(RoundsHardlineGameManager __instance)
         {
             if (!FFAModToggle.IsFFAModeActive())
             {
@@ -1612,13 +1586,12 @@ namespace FFAMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "ShowFFARoundWin")]
     public class FFAShowRoundWinPatch
     {
-        static bool Prefix(RoundsHardlineGameManager __instance, string winnerName, ref int score)
+        private static bool Prefix(RoundsHardlineGameManager __instance, string winnerName, ref int score)
         {
             if (!FFAModToggle.IsFFAModeActive())
             {
                 return true; // Let original method run
             }
-
             // Get our mod-tracked score for this player
             int modScore = FFAModToggle.GetModFFAScore(winnerName);
 
@@ -1639,7 +1612,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(PlayerFirearm), "HitAnotherTarget")]
     public class GunGameFirearmHitPatch
     {
-        static void Prefix(PlayerFirearm __instance, bool killShot, Human target)
+        private static void Prefix(PlayerFirearm __instance, bool killShot, Human target)
         {
             if (FFAModToggle.IsGunGameModeActive() && __instance.User != null)
             {
@@ -1656,7 +1629,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(PlayerItem), "HitAnotherTarget")]
     public class GunGameItemHitPatch
     {
-        static void Prefix(PlayerItem __instance, bool killShot, Human target)
+        private static void Prefix(PlayerItem __instance, bool killShot, Human target)
         {
             if (FFAModToggle.IsGunGameModeActive() && __instance.User != null)
             {
@@ -1678,7 +1651,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(Human), "AddKill")]
     public class GunGameAddKillPatch
     {
-        static void Postfix(Human __instance)
+        private static void Postfix(Human __instance)
         {
             if (!FFAModToggle.IsGunGameModeActive())
             {
@@ -1686,7 +1659,7 @@ namespace FFAMod
             }
 
             // Only process for players (not AI)
-            if (!(__instance is Player))
+            if (__instance is not Player)
             {
                 return;
             }
@@ -1723,7 +1696,7 @@ namespace FFAMod
 
                 // Trigger FULL GAME END (not just a round) via FFAEndGame
                 // This shows "wins the game!" notification and shuts down the lobby
-                RoundsHardlineGameManager gm = UnityEngine.Object.FindObjectOfType<RoundsHardlineGameManager>();
+                RoundsHardlineGameManager gm = FFAModToggle.GetGameManager();
                 if (gm != null && gm.isServer)
                 {
                     // Set round-end flags to prevent further game logic
@@ -1731,8 +1704,8 @@ namespace FFAMod
                         System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     var roundEndFlagField = typeof(RoundsHardlineGameManager).GetField("roundEndFlag",
                         System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (ffaRoundEndFlagField != null) ffaRoundEndFlagField.SetValue(gm, true);
-                    if (roundEndFlagField != null) roundEndFlagField.SetValue(gm, true);
+                    ffaRoundEndFlagField?.SetValue(gm, true);
+                    roundEndFlagField?.SetValue(gm, true);
 
                     // Call FFAEndGame to end the entire game and close lobby
                     var endGameMethod = typeof(RoundsHardlineGameManager).GetMethod("FFAEndGame",
@@ -1740,7 +1713,7 @@ namespace FFAMod
                     if (endGameMethod != null)
                     {
                         FFAModToggle.StaticLogger.LogInfo($"Gun Game: Triggering FFAEndGame for {player.HumanName} - GAME OVER!");
-                        endGameMethod.Invoke(gm, new object[] { player });
+                        endGameMethod.Invoke(gm, [player]);
                     }
                     else
                     {
@@ -1824,7 +1797,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(Player), "GoToSpawn")]
     public class GunGameGoToSpawnPatch
     {
-        static void Postfix(Player __instance)
+        private static void Postfix(Player __instance)
         {
             if (!FFAModToggle.IsGunGameModeActive())
             {
@@ -1894,7 +1867,7 @@ namespace FFAMod
     [HarmonyPriority(Priority.High)]
     public class GunGameRoundModePatch
     {
-        static bool Prefix()
+        private static bool Prefix()
         {
             if (!FFAModToggle.IsGunGameModeActive())
             {
@@ -1914,7 +1887,7 @@ namespace FFAMod
     [HarmonyPriority(Priority.High)]
     public class GunGameFFARoundWinPatch
     {
-        static bool Prefix(RoundsHardlineGameManager __instance, Human winner)
+        private static bool Prefix(RoundsHardlineGameManager __instance, Human winner)
         {
             if (!FFAModToggle.IsGunGameModeActive())
             {
@@ -1940,7 +1913,7 @@ namespace FFAMod
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "OpenLoadoutSelect")]
     public class GunGameBlockLoadoutSelectPatch
     {
-        static bool Prefix()
+        private static bool Prefix()
         {
             if (!FFAModToggle.IsGunGameModeActive())
             {
@@ -1960,13 +1933,13 @@ namespace FFAMod
     [HarmonyPatch(typeof(HardlineGameManager), "HitAnotherPlayer")]
     public class GunGameVictimDemotionPatch
     {
-        static void Postfix(Human causer, Human target, Vector3 hitPos, Vector3 hitRot, bool killShot, HardlineGameManager __instance)
+        private static void Postfix(Human causer, Human target, Vector3 hitPos, Vector3 hitRot, bool killShot, HardlineGameManager __instance)
         {
             if (!FFAModToggle.IsGunGameModeActive()) return;
             if (!killShot || target == null || causer == null) return;
 
             // Detect if the kill was with a knife (non-firearm weapon)
-            bool isKnifeKill = (causer.Item != null && !(causer.Item is PlayerFirearm)) || causer.NetworkitemString == "Knife";
+            bool isKnifeKill = (causer.Item != null && causer.Item is not PlayerFirearm) || causer.NetworkitemString == "Knife";
 
             // ===== VICTIM-SIDE DEMOTION (runs on victim's authority machine) =====
             if (target.hasAuthority && target is Player && isKnifeKill)
@@ -2034,8 +2007,8 @@ namespace FFAMod
                             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                         var roundEndFlagField = typeof(RoundsHardlineGameManager).GetField("roundEndFlag",
                             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        if (ffaRoundEndFlagField != null) ffaRoundEndFlagField.SetValue(gm, true);
-                        if (roundEndFlagField != null) roundEndFlagField.SetValue(gm, true);
+                        ffaRoundEndFlagField?.SetValue(gm, true);
+                        roundEndFlagField?.SetValue(gm, true);
 
                         // Call FFAEndGame
                         var endGameMethod = typeof(RoundsHardlineGameManager).GetMethod("FFAEndGame",
@@ -2043,38 +2016,11 @@ namespace FFAMod
                         if (endGameMethod != null)
                         {
                             FFAModToggle.StaticLogger.LogInfo($"Gun Game SERVER: Triggering FFAEndGame for {killerPlayer.HumanName} - GAME OVER!");
-                            endGameMethod.Invoke(gm, new object[] { killerPlayer });
+                            endGameMethod.Invoke(gm, [killerPlayer]);
                         }
                     }
                 }
             }
         }
     }
-
-    // ==================== RAINBOW KILL TEXT PATCH ====================
-    // When PeakZelo appears in kill feed text, apply rainbow colors + (dev) tag
-    [HarmonyPatch(typeof(KillText), "CreateNewKillText")]
-    public class PeakZeloKillTextPatch
-    {
-        static void Postfix(KillText __instance, string playerName)
-        {
-            if (playerName == null || !playerName.Contains("PeakZelo")) return;
-
-            try
-            {
-                // KillText creates child objects with Text components
-                var texts = __instance.GetComponentsInChildren<Text>(true);
-                foreach (var t in texts)
-                {
-                    if (t != null && t.text != null && t.text.Contains("PeakZelo"))
-                    {
-                        t.supportRichText = true;
-                        t.text = t.text.Replace("PeakZelo", FFAModToggle.MakeRainbowText("PeakZelo (dev)"));
-                    }
-                }
-            }
-            catch (System.Exception) { }
-        }
-    }
-
 }
