@@ -10,6 +10,25 @@ using HarmonyLib;
 
 namespace FFAMod
 {
+    // Mod-defined network messages for the plain FFA round-win/restart/game-win flow.
+    // Mirror's Weaver (which auto-generates message serialization) only runs against the
+    // game's own assembly at build time, never against this mod's DLL, so these are wired
+    // up manually via Reader<T>/Writer<T> in FFAModToggle.RegisterFFANetworkMessages.
+    internal struct FFARoundWinMessage : NetworkMessage
+    {
+        public string winnerName;
+        public int score;
+    }
+
+    internal struct FFARestartRoundMessage : NetworkMessage
+    {
+    }
+
+    internal struct FFAGameWinMessage : NetworkMessage
+    {
+        public string winnerName;
+    }
+
     [BepInPlugin("com.peakzelo.ffamod", "Free For All Mode Toggle", "4.6.7")]
     // Removed BepInProcess so it works on both Windows and Mac
     public class FFAModToggle : BaseUnityPlugin
@@ -162,9 +181,217 @@ namespace FFAMod
         // FFA team assignment system - use player names as keys for persistence
         private static Dictionary<string, int> ffaPlayerTeams = new Dictionary<string, int>();
 
-        // MOD-SIDE FFA score tracking (by player name, not netId)
-        // This fixes the issue where the game's score display always shows 1/5
-        private static Dictionary<string, int> modFFAScores = new Dictionary<string, int>();
+        // ==================== NATIVE FFA ROUND-FLOW REPLICATION ====================
+        // Plain "Free For All" round win / restart / game win used to rely on FFA support
+        // baked directly into the game's compiled assembly (a RoundsHardlineGameManager.
+        // FFARoundMode/FFARoundWin/FFARestartRound/FFAEndGame chain plus three Mirror RPCs).
+        // Reimplemented entirely here so it works against a stock game install: state lives
+        // in this mod instead of on RoundsHardlineGameManager, and round-win/restart/game-win
+        // sync uses Mirror's manual NetworkMessage registration (Reader<T>/Writer<T>) instead
+        // of Weaver-generated RPCs, since Weaver never runs against this mod's own assembly.
+        private static Dictionary<uint, int> ffaRoundWinScores = new Dictionary<uint, int>();
+        private static Dictionary<uint, string> ffaRoundWinNames = new Dictionary<uint, string>();
+        private static bool ffaRoundWinEndFlag = false;
+        private const float ffaRoundWinRestartDelay = 4f;
+        private const int ffaRoundWinRequiredWins = 5;
+
+        // Set LobbyUIManager.isFreeForAllMode via reflection when it exists (only true when
+        // running against an assembly with the native FFA UI polish baked in - Scoreboard /
+        // RoundsUserInterface / MultiplayerNetworkManager read it for cosmetic display only).
+        // No-ops on a stock install so this mod compiles and runs the same either way.
+        private static readonly System.Reflection.FieldInfo nativeIsFreeForAllModeField =
+            typeof(LobbyUIManager).GetField("isFreeForAllMode", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+
+        private static void SetNativeFFAFlag(bool value)
+        {
+            nativeIsFreeForAllModeField?.SetValue(null, value);
+        }
+
+        private static bool GetNativeFFAFlag()
+        {
+            return nativeIsFreeForAllModeField != null && (bool)nativeIsFreeForAllModeField.GetValue(null);
+        }
+
+        private static readonly System.Reflection.FieldInfo gameUIField =
+            typeof(HardlineGameManager).GetField("gameUI", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo roundEndFlagField =
+            typeof(RoundsHardlineGameManager).GetField("roundEndFlag", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        private static void ShowGameNotification(HardlineGameManager manager, string message)
+        {
+            var gameUI = gameUIField?.GetValue(manager);
+            if (gameUI == null) return;
+            var showNotificationMethod = gameUI.GetType().GetMethod("ShowNotification",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            showNotificationMethod?.Invoke(gameUI, new object[] { message });
+        }
+
+        // Registers the mod's own network messages with Mirror so round-win/restart/game-win
+        // state can be broadcast to clients without needing Weaver-generated RPCs.
+        private static void RegisterFFANetworkMessages()
+        {
+            Writer<FFARoundWinMessage>.write = (writer, msg) =>
+            {
+                writer.WriteString(msg.winnerName);
+                writer.WriteInt(msg.score);
+            };
+            Reader<FFARoundWinMessage>.read = reader => new FFARoundWinMessage
+            {
+                winnerName = reader.ReadString(),
+                score = reader.ReadInt()
+            };
+
+            Writer<FFARestartRoundMessage>.write = (writer, msg) => { };
+            Reader<FFARestartRoundMessage>.read = reader => new FFARestartRoundMessage();
+
+            Writer<FFAGameWinMessage>.write = (writer, msg) => writer.WriteString(msg.winnerName);
+            Reader<FFAGameWinMessage>.read = reader => new FFAGameWinMessage { winnerName = reader.ReadString() };
+
+            NetworkClient.RegisterHandler<FFARoundWinMessage>(OnFFARoundWinMessage);
+            NetworkClient.RegisterHandler<FFARestartRoundMessage>(OnFFARestartRoundMessage);
+            NetworkClient.RegisterHandler<FFAGameWinMessage>(OnFFAGameWinMessage);
+        }
+
+        // Server-side: detects the last player standing and drives the round-win flow.
+        // Equivalent to the native FFARoundMode check (same gameStartTimer countdown guard).
+        public static void RunFFARoundModeCheck(RoundsHardlineGameManager manager)
+        {
+            if (manager.NetworkgameStartTimer > 0) return; // countdown/loadout phase
+
+            Player lastPlayerAlive = null;
+            int aliveCount = 0;
+            foreach (Player p in UnityEngine.Object.FindObjectsOfType<Player>())
+            {
+                if (p.Health > 0f)
+                {
+                    aliveCount++;
+                    lastPlayerAlive = p;
+                }
+            }
+
+            if (aliveCount == 1 && lastPlayerAlive != null && !ffaRoundWinEndFlag)
+            {
+                RunFFARoundWin(manager, lastPlayerAlive);
+            }
+        }
+
+        public static void RunFFARoundWin(RoundsHardlineGameManager manager, Player winner)
+        {
+            if (ffaRoundWinEndFlag) return;
+            ffaRoundWinEndFlag = true;
+            roundEndFlagField?.SetValue(manager, true);
+
+            uint netId = winner.netId;
+            if (!ffaRoundWinScores.ContainsKey(netId))
+            {
+                ffaRoundWinScores[netId] = 0;
+                ffaRoundWinNames[netId] = winner.HumanName;
+            }
+            ffaRoundWinScores[netId]++;
+            int currentScore = ffaRoundWinScores[netId];
+            string winnerName = winner.HumanName;
+
+            // Weapon tier progression (read by FFAGenerateRandomLoadoutPatch) advances every
+            // 2 completed rounds, same as the native flow this replaces.
+            IncrementFFACompletedRounds();
+
+            StaticLogger.LogInfo($"FFA: {winnerName} wins the round! Score: {currentScore}/{ffaRoundWinRequiredWins}");
+            ShowGameNotification(manager, $"{winnerName} wins the round! ({currentScore}/{ffaRoundWinRequiredWins})");
+            NetworkServer.SendToAll(new FFARoundWinMessage { winnerName = winnerName, score = currentScore });
+
+            if (currentScore >= ffaRoundWinRequiredWins)
+            {
+                RunFFAEndGame(manager, winner);
+            }
+            else if (Instance != null)
+            {
+                Instance.StartCoroutine(DelayedFFARestartRound(manager));
+            }
+        }
+
+        private static IEnumerator DelayedFFARestartRound(RoundsHardlineGameManager manager)
+        {
+            yield return new WaitForSeconds(ffaRoundWinRestartDelay);
+            RunFFARestartRound(manager);
+        }
+
+        public static void RunFFARestartRound(RoundsHardlineGameManager manager)
+        {
+            ffaRoundWinEndFlag = false;
+            roundEndFlagField?.SetValue(manager, false);
+            manager.RestartGameCharacter();
+            NetworkServer.SendToAll(new FFARestartRoundMessage());
+        }
+
+        private static readonly System.Reflection.FieldInfo serverCloseOnGameEndDelayField =
+            typeof(RoundsHardlineGameManager).GetField("serverCloseOnGameEndDelay", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private static readonly System.Reflection.FieldInfo clientLeaveOnGameEndDelayField =
+            typeof(RoundsHardlineGameManager).GetField("clientLeaveOnGameEndDelay", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        public static void RunFFAEndGame(RoundsHardlineGameManager manager, Player winner)
+        {
+            string winnerName = winner.HumanName;
+            StaticLogger.LogInfo($"FFA: {winnerName} wins the game!");
+            ShowGameNotification(manager, $"{winnerName} wins the game!");
+            NetworkServer.SendToAll(new FFAGameWinMessage { winnerName = winnerName });
+
+            StaticLogger.LogInfo("FFA: === Final Scores ===");
+            foreach (var score in ffaRoundWinScores.OrderByDescending(x => x.Value))
+            {
+                string playerName = ffaRoundWinNames.ContainsKey(score.Key) ? ffaRoundWinNames[score.Key] : "Unknown";
+                StaticLogger.LogInfo($"FFA:   {playerName}: {score.Value}");
+            }
+
+            // Shut down the server / return to lobby after a delay - same as the native
+            // FFAEndGame flow this replaces (RunFFAEndGame is always called server-side).
+            float shutdownDelay = manager.isServer
+                ? (float?)serverCloseOnGameEndDelayField?.GetValue(manager) ?? 8f
+                : (float?)clientLeaveOnGameEndDelayField?.GetValue(manager) ?? 6f;
+            manager.Invoke("ShutdownGame", shutdownDelay);
+
+            ffaRoundWinScores.Clear();
+            ffaRoundWinNames.Clear();
+        }
+
+        // Client-side handlers - mirror the native UserCode_RpcFFA* methods' "!isServer" guard,
+        // since the server already showed/handled these locally when it computed the result.
+        private static void OnFFARoundWinMessage(FFARoundWinMessage msg)
+        {
+            if (NetworkServer.active) return;
+
+            // Keep this client's weapon tier counter in sync with the server's (same as the
+            // native UserCode_RpcFFARoundWin flow this replaces).
+            IncrementFFACompletedRounds();
+            StaticLogger.LogInfo($"FFA: Client synced round counter. Total rounds: {GetFFACompletedRounds()}, Weapon tier: {GetFFAWeaponTier()}");
+
+            var manager = UnityEngine.Object.FindObjectOfType<RoundsHardlineGameManager>();
+            if (manager != null)
+            {
+                ShowGameNotification(manager, $"{msg.winnerName} wins the round! ({msg.score}/{ffaRoundWinRequiredWins})");
+            }
+        }
+
+        private static void OnFFARestartRoundMessage(FFARestartRoundMessage msg)
+        {
+            if (NetworkServer.active) return;
+            ffaRoundWinEndFlag = false;
+            var manager = UnityEngine.Object.FindObjectOfType<RoundsHardlineGameManager>();
+            if (manager != null)
+            {
+                roundEndFlagField?.SetValue(manager, false);
+                manager.RestartGameCharacter();
+            }
+        }
+
+        private static void OnFFAGameWinMessage(FFAGameWinMessage msg)
+        {
+            if (NetworkServer.active) return;
+            var manager = UnityEngine.Object.FindObjectOfType<RoundsHardlineGameManager>();
+            if (manager != null)
+            {
+                ShowGameNotification(manager, $"{msg.winnerName} wins the game!");
+            }
+        }
 
         // Keybind configuration
         private static KeyCode ffaMenuKey = KeyCode.F7;
@@ -189,6 +416,19 @@ namespace FFAMod
             // Apply Harmony patches
             harmony = new Harmony("com.peakzelo.ffamod");
             harmony.PatchAll();
+
+            // RoundsHardlineGameManager may have its own hidden "new" override of
+            // GetSpawnPositionForTeam if running against an assembly with native FFA support
+            // baked in. Only patch it if it actually exists - FFASpawnPatchBase (auto-patched
+            // above via PatchAll) already covers a stock game install fully on its own.
+            var nativeSpawnMethod = AccessTools.DeclaredMethod(typeof(RoundsHardlineGameManager), "GetSpawnPositionForTeam");
+            if (nativeSpawnMethod != null)
+            {
+                harmony.Patch(nativeSpawnMethod, prefix: new HarmonyMethod(typeof(FFASpawnPatch), nameof(FFASpawnPatch.Prefix)));
+                Logger.LogInfo("FFA: Native GetSpawnPositionForTeam override detected - patched directly.");
+            }
+
+            RegisterFFANetworkMessages();
 
             Logger.LogInfo("Harmony patches applied successfully!");
 
@@ -364,8 +604,8 @@ namespace FFAMod
 
                 localFFAMode = !localFFAMode;
 
-                // Set the game's FFA flag so it uses FFA round logic instead of team logic
-                LobbyUIManager.isFreeForAllMode = localFFAMode || gunGameMode;
+                // Set the game's FFA flag (if present) so any native FFA UI polish stays in sync
+                SetNativeFFAFlag(localFFAMode || gunGameMode);
 
                 Logger.LogInfo($"FFA Mode: {localFFAMode}");
             }
@@ -397,8 +637,8 @@ namespace FFAMod
                     Logger.LogInfo("Gun Game enabled - all players start at level 0 (Pistol)");
                 }
 
-                // Gun Game also needs FFA mode flag for unique team assignment
-                LobbyUIManager.isFreeForAllMode = localFFAMode || gunGameMode;
+                // Gun Game also needs the native FFA flag (if present) kept in sync
+                SetNativeFFAFlag(localFFAMode || gunGameMode);
 
                 Logger.LogInfo($"Gun Game Mode: {gunGameMode}");
             }
@@ -613,10 +853,10 @@ namespace FFAMod
             // Gun Game respawn logic
             if (gunGameMode && !localFFAMode)
             {
-                // Enforce isFreeForAllMode so players on unique teams can damage each other
-                if (!LobbyUIManager.isFreeForAllMode)
+                // Enforce the native FFA flag (if present) so players on unique teams can damage each other
+                if (!GetNativeFFAFlag())
                 {
-                    LobbyUIManager.isFreeForAllMode = true;
+                    SetNativeFFAFlag(true);
                 }
 
                 // Find local player (the one we have authority over)
@@ -684,11 +924,11 @@ namespace FFAMod
             RoundsHardlineGameManager gameManager = FindObjectOfType<RoundsHardlineGameManager>();
             if (gameManager != null)
             {
-                // Make sure the FFA flag stays set on ALL clients
-                if (!LobbyUIManager.isFreeForAllMode)
+                // Make sure the native FFA flag (if present) stays set on ALL clients
+                if (!GetNativeFFAFlag())
                 {
-                    LobbyUIManager.isFreeForAllMode = true;
-                    Logger.LogInfo("FFA: Re-enabled LobbyUIManager.isFreeForAllMode");
+                    SetNativeFFAFlag(true);
+                    Logger.LogInfo("FFA: Re-enabled native isFreeForAllMode flag");
                 }
 
                 // CLIENT-SIDE: Detect when we need to respawn by watching timer transitions
@@ -1227,22 +1467,10 @@ namespace FFAMod
         public static void ResetFFACompletedRounds()
         {
             ffaCompletedRounds = 0;
-            modFFAScores.Clear();
+            ffaRoundWinScores.Clear();
+            ffaRoundWinNames.Clear();
+            ffaRoundWinEndFlag = false;
             StaticLogger.LogInfo("FFA: Reset completed rounds counter and scores");
-        }
-
-        // MOD-SIDE score tracking methods
-        public static void IncrementModFFAScore(string playerName)
-        {
-            if (!modFFAScores.ContainsKey(playerName))
-                modFFAScores[playerName] = 0;
-            modFFAScores[playerName]++;
-            StaticLogger.LogInfo($"FFA MOD SCORE: {playerName} now has {modFFAScores[playerName]} wins");
-        }
-
-        public static int GetModFFAScore(string playerName)
-        {
-            return modFFAScores.ContainsKey(playerName) ? modFFAScores[playerName] : 0;
         }
 
         public static string GetCurrentMapName()
@@ -1342,11 +1570,13 @@ namespace FFAMod
         }
     }
 
-    // Harmony patch to override spawn position selection in FFA mode (RoundsHardlineGameManager)
-    [HarmonyPatch(typeof(RoundsHardlineGameManager), "GetSpawnPositionForTeam")]
+    // Overrides spawn position selection in FFA mode on RoundsHardlineGameManager's own
+    // "new"-hidden GetSpawnPositionForTeam override. Only present (and only patched, see
+    // FFAModToggle.Awake) when running against an assembly with native FFA support baked in;
+    // FFASpawnPatchBase below covers a stock game install on its own.
     public class FFASpawnPatch
     {
-        static bool Prefix(RoundsHardlineGameManager __instance, ref Transform __result)
+        public static bool Prefix(RoundsHardlineGameManager __instance, ref Transform __result)
         {
             // Only intercept if local FFA mode is active
             if (!FFAModToggle.IsFFAModeActive())
@@ -1436,118 +1666,6 @@ namespace FFAMod
         }
     }
 
-    // Patch FFARoundWin to track completed rounds for weapon tier progression
-    [HarmonyPatch(typeof(RoundsHardlineGameManager), "FFARoundWin")]
-    public class FFARoundWinPatch
-    {
-        static void Prefix(RoundsHardlineGameManager __instance, Human winner)
-        {
-            if (!FFAModToggle.IsFFAModeActive())
-            {
-                return;
-            }
-
-            // Increment completed rounds counter for weapon tier progression
-            FFAModToggle.IncrementFFACompletedRounds();
-            FFAModToggle.StaticLogger.LogInfo($"FFA: Round completed. Total rounds: {FFAModToggle.GetFFACompletedRounds()}, Weapon tier: {FFAModToggle.GetFFAWeaponTier()}");
-
-            if (winner == null || !(winner is Player))
-            {
-                return;
-            }
-
-            Player winningPlayer = (Player)winner;
-
-            // Increment MOD-SIDE score tracking (by player name, not netId)
-            // This is reliable since player names don't change between rounds
-            FFAModToggle.IncrementModFFAScore(winningPlayer.HumanName);
-
-            // Log winner info and netId for debugging
-            FFAModToggle.StaticLogger.LogInfo($"FFA: Winner={winningPlayer.HumanName}, netId={winningPlayer.netId}, isServer={__instance.isServer}");
-        }
-
-        static void Postfix(RoundsHardlineGameManager __instance, Human winner)
-        {
-            if (!FFAModToggle.IsFFAModeActive() || winner == null || !(winner is Player))
-            {
-                return;
-            }
-
-            Player winningPlayer = (Player)winner;
-
-            // Log the actual score from the game's internal dictionary
-            try
-            {
-                var ffaPlayerScoresField = typeof(RoundsHardlineGameManager).GetField("ffaPlayerScores",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (ffaPlayerScoresField != null)
-                {
-                    var scores = ffaPlayerScoresField.GetValue(__instance) as Dictionary<uint, int>;
-                    if (scores != null)
-                    {
-                        FFAModToggle.StaticLogger.LogInfo($"FFA: Game scores after round:");
-                        foreach (var kvp in scores)
-                        {
-                            FFAModToggle.StaticLogger.LogInfo($"  netId={kvp.Key}: score={kvp.Value}");
-                        }
-                        if (scores.ContainsKey(winningPlayer.netId))
-                        {
-                            int actualScore = scores[winningPlayer.netId];
-                            FFAModToggle.StaticLogger.LogInfo($"FFA: Winner's actual score (game): {actualScore}");
-                        }
-                    }
-                }
-            }
-            catch (System.Exception ex)
-            {
-                FFAModToggle.StaticLogger.LogError($"FFA: Error reading scores - {ex.Message}");
-            }
-
-            // SERVER-SIDE: Show corrected notification with mod-tracked score
-            // This overwrites the game's buggy notification that always shows 1/5
-            if (__instance.isServer)
-            {
-                try
-                {
-                    int modScore = FFAModToggle.GetModFFAScore(winningPlayer.HumanName);
-
-                    // Get ffaRequiredWins from game
-                    var ffaRequiredWinsField = typeof(RoundsHardlineGameManager).GetField("ffaRequiredWins",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    int requiredWins = 5; // Default
-                    if (ffaRequiredWinsField != null)
-                    {
-                        requiredWins = (int)ffaRequiredWinsField.GetValue(__instance);
-                    }
-
-                    // Access gameUI via reflection (it's private)
-                    var gameUIField = typeof(HardlineGameManager).GetField("gameUI",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (gameUIField != null)
-                    {
-                        var gameUI = gameUIField.GetValue(__instance);
-                        if (gameUI != null)
-                        {
-                            // Call ShowNotification via reflection
-                            var showNotificationMethod = gameUI.GetType().GetMethod("ShowNotification",
-                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                            if (showNotificationMethod != null)
-                            {
-                                string message = $"{winningPlayer.HumanName} wins the round! ({modScore}/{requiredWins})";
-                                showNotificationMethod.Invoke(gameUI, new object[] { message });
-                                FFAModToggle.StaticLogger.LogInfo($"FFA SERVER: Showed corrected notification - {winningPlayer.HumanName} ({modScore}/{requiredWins})");
-                            }
-                        }
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    FFAModToggle.StaticLogger.LogError($"FFA: Error showing corrected notification - {ex.Message}");
-                }
-            }
-        }
-    }
-
     // Patch GenerateRandomLoadout to use FFA weapon tier progression
     [HarmonyPatch(typeof(RoundsHardlineGameManager), "GenerateRandomLoadout")]
     public class FFAGenerateRandomLoadoutPatch
@@ -1563,71 +1681,6 @@ namespace FFAMod
             int ffaTier = FFAModToggle.GetFFAWeaponTier();
             FFAModToggle.StaticLogger.LogInfo($"FFA: Generating loadout with tier {ffaTier} (rounds completed: {FFAModToggle.GetFFACompletedRounds()})");
             tier = ffaTier;
-        }
-    }
-
-    // Patch UserCode_RpcFFARoundWin to sync round counter to clients
-    [HarmonyPatch(typeof(RoundsHardlineGameManager), "UserCode_RpcFFARoundWin")]
-    public class FFAUserCodeRpcFFARoundWinPatch
-    {
-        static void Prefix(RoundsHardlineGameManager __instance, string winnerName, int score)
-        {
-            if (!FFAModToggle.IsFFAModeActive())
-            {
-                return;
-            }
-
-            // Log what score the server sent us
-            FFAModToggle.StaticLogger.LogInfo($"FFA RPC: Received round win - Winner={winnerName}, Score={score}, isServer={__instance.isServer}");
-
-            // CLIENT-SIDE: Increment mod score BEFORE ShowFFARoundWin runs
-            // This ensures the correct score is available when our ShowFFARoundWin patch runs
-            if (!__instance.isServer)
-            {
-                FFAModToggle.IncrementModFFAScore(winnerName);
-            }
-        }
-
-        static void Postfix(RoundsHardlineGameManager __instance)
-        {
-            if (!FFAModToggle.IsFFAModeActive())
-            {
-                return;
-            }
-
-            // This runs on clients when they receive round win notification
-            if (!__instance.isServer)
-            {
-                FFAModToggle.IncrementFFACompletedRounds();
-                FFAModToggle.StaticLogger.LogInfo($"FFA: Client synced round counter. Total rounds: {FFAModToggle.GetFFACompletedRounds()}, Weapon tier: {FFAModToggle.GetFFAWeaponTier()}");
-
-                // Also increment mod-side score for this winner on clients
-                // (Prefix runs before increment, so we need to get + 1)
-            }
-        }
-    }
-
-    // Patch ShowFFARoundWin to use MOD-TRACKED scores instead of game's buggy netId-based tracking
-    // The game's ffaPlayerScores dictionary seems to reset or use changing netIds, causing score=1 always
-    [HarmonyPatch(typeof(RoundsHardlineGameManager), "ShowFFARoundWin")]
-    public class FFAShowRoundWinPatch
-    {
-        static bool Prefix(RoundsHardlineGameManager __instance, string winnerName, ref int score)
-        {
-            if (!FFAModToggle.IsFFAModeActive())
-            {
-                return true; // Let original method run
-            }
-
-            // Get our mod-tracked score for this player
-            int modScore = FFAModToggle.GetModFFAScore(winnerName);
-
-            FFAModToggle.StaticLogger.LogInfo($"FFA ShowFFARoundWin: Game sent score={score}, using mod score={modScore} for {winnerName}");
-
-            // Override the score parameter with our tracked score
-            score = modScore;
-
-            return true; // Continue with original method using our corrected score
         }
     }
 
@@ -1734,18 +1787,9 @@ namespace FFAMod
                     if (ffaRoundEndFlagField != null) ffaRoundEndFlagField.SetValue(gm, true);
                     if (roundEndFlagField != null) roundEndFlagField.SetValue(gm, true);
 
-                    // Call FFAEndGame to end the entire game and close lobby
-                    var endGameMethod = typeof(RoundsHardlineGameManager).GetMethod("FFAEndGame",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (endGameMethod != null)
-                    {
-                        FFAModToggle.StaticLogger.LogInfo($"Gun Game: Triggering FFAEndGame for {player.HumanName} - GAME OVER!");
-                        endGameMethod.Invoke(gm, new object[] { player });
-                    }
-                    else
-                    {
-                        FFAModToggle.StaticLogger.LogError("Gun Game: Could not find FFAEndGame method!");
-                    }
+                    // End the game (mod-side implementation - see RunFFAEndGame)
+                    FFAModToggle.StaticLogger.LogInfo($"Gun Game: Triggering game end for {player.HumanName} - GAME OVER!");
+                    FFAModToggle.RunFFAEndGame(gm, player);
                 }
 
                 return;
@@ -1908,31 +1952,26 @@ namespace FFAMod
         }
     }
 
-    // Safety net: block FFARoundWin if it somehow gets called during Gun Game
-    // (shouldn't happen since RoundMode is patched, but just in case)
-    [HarmonyPatch(typeof(RoundsHardlineGameManager), "FFARoundWin")]
+    // Plain "Free For All" round-win detection (last player standing, first-to-5), reimplemented
+    // entirely mod-side - see FFAModToggle's "NATIVE FFA ROUND-FLOW REPLICATION" region.
+    [HarmonyPatch(typeof(RoundsHardlineGameManager), "RoundMode")]
     [HarmonyPriority(Priority.High)]
-    public class GunGameFFARoundWinPatch
+    public class FFANativeRoundModePatch
     {
-        static bool Prefix(RoundsHardlineGameManager __instance, Human winner)
+        static bool Prefix(RoundsHardlineGameManager __instance)
         {
-            if (!FFAModToggle.IsGunGameModeActive())
+            if (!FFAModToggle.IsFFAModeActive() || FFAModToggle.IsGunGameModeActive())
             {
-                return true; // Let normal FFA/other patches run
+                return true; // Not plain FFA mode - let normal/Gun Game round logic run
             }
 
-            // In Gun Game, only allow round win if someone got a knife kill
-            Player gunGameWinner = FFAModToggle.GetGunGameWinner();
-            if (gunGameWinner != null)
+            if (!__instance.isServer)
             {
-                FFAModToggle.ClearGunGameWinner();
-                FFAModToggle.StaticLogger.LogInfo($"Gun Game: Allowing round win for knife kill winner");
-                return true;
+                return false; // Round-win detection is server-authoritative; clients wait for the message
             }
 
-            // Block all other round wins
-            FFAModToggle.StaticLogger.LogInfo($"Gun Game: Blocking FFARoundWin (respawn handled by LateUpdate)");
-            return false;
+            FFAModToggle.RunFFARoundModeCheck(__instance);
+            return false; // Skip the original team-based RoundMode entirely
         }
     }
 
@@ -2037,14 +2076,9 @@ namespace FFAMod
                         if (ffaRoundEndFlagField != null) ffaRoundEndFlagField.SetValue(gm, true);
                         if (roundEndFlagField != null) roundEndFlagField.SetValue(gm, true);
 
-                        // Call FFAEndGame
-                        var endGameMethod = typeof(RoundsHardlineGameManager).GetMethod("FFAEndGame",
-                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        if (endGameMethod != null)
-                        {
-                            FFAModToggle.StaticLogger.LogInfo($"Gun Game SERVER: Triggering FFAEndGame for {killerPlayer.HumanName} - GAME OVER!");
-                            endGameMethod.Invoke(gm, new object[] { killerPlayer });
-                        }
+                        // End the game (mod-side implementation - see RunFFAEndGame)
+                        FFAModToggle.StaticLogger.LogInfo($"Gun Game SERVER: Triggering game end for {killerPlayer.HumanName} - GAME OVER!");
+                        FFAModToggle.RunFFAEndGame(gm, killerPlayer);
                     }
                 }
             }

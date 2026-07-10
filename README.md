@@ -9,6 +9,7 @@ These are unofficial, fan-made mods and are not affiliated with, endorsed by, or
 - **CustomMapsMod** — Lets a host load custom maps from AssetBundles dropped into a `CustomMaps/` folder next to the game. Injects spawn points, resupply stations, uplink placement, lighting, and per-renderer colors/textures for the imported geometry.
 - **FFAMod** — Adds a Free-For-All mode and a Gun Game mode on top of the game's normal team play, including its own spawn selection, weapon progression, and score tracking.
 - **HostKickMod** — Adds a host-only menu to disconnect players, plus a configurable custom crosshair overlay for everyone.
+- **MaxPlayersMod** — Removes the game's hardcoded 5-player lobby cap and creates the Steam lobby at Steam's own maximum (250) instead.
 - **CustomMapTemplate** — Not a mod; a set of Unity Editor scripts (exporter + spawn/lighting marker components) plus two beginner-friendly guides for building and exporting `.bundle` map files that work with CustomMapsMod.
 
 ## Requirements
@@ -24,7 +25,7 @@ Each mod is a standalone class library project. The `.csproj` files reference ga
 
 ### 1. Place the project folders
 
-Copy `CustomMapsMod/`, `FFAMod/`, and `HostKickMod/` directly into your Project Hardline install directory (the folder containing `Project Hardline.exe`), so the layout looks like:
+Copy `CustomMapsMod/`, `FFAMod/`, `HostKickMod/`, and `MaxPlayersMod/` directly into your Project Hardline install directory (the folder containing `Project Hardline.exe`), so the layout looks like:
 
 ```
 Project Hardline/
@@ -32,7 +33,8 @@ Project Hardline/
 ├── Project Hardline_Data/
 ├── CustomMapsMod/
 ├── FFAMod/
-└── HostKickMod/
+├── HostKickMod/
+└── MaxPlayersMod/
 ```
 
 ### 2. Build HostKickMod first
@@ -49,7 +51,7 @@ cd ..
 
 (Or open `HostKickMod.csproj` in Visual Studio and use Build → Build Solution — just make sure it's built in **Debug** config, since that's the path FFAMod's `.csproj` points at.)
 
-### 3. Build the other two mods
+### 3. Build the other mods
 
 ```
 cd FFAMod
@@ -59,9 +61,13 @@ cd ..
 cd CustomMapsMod
 dotnet build
 cd ..
+
+cd MaxPlayersMod
+dotnet build
+cd ..
 ```
 
-Order between FFAMod and CustomMapsMod doesn't matter — only HostKickMod has to come first.
+Order between FFAMod, CustomMapsMod, and MaxPlayersMod doesn't matter — only HostKickMod has to come first.
 
 ### 4. Output
 
@@ -69,7 +75,7 @@ Each project has a post-build step (`CopyToPlugins` in the `.csproj`) that autom
 
 ## Installing (pre-built)
 
-Drop the built `CustomMapsMod.dll`, `FFAMod.dll`, and `HostKickMod.dll` into your `BepInEx/plugins/` folder.
+Just want to run the mods, not build them? See [INSTALL.md](INSTALL.md) for a full Windows + Mac walkthrough, including installing BepInEx itself. Short version: drop the built `CustomMapsMod.dll`, `FFAMod.dll`, `HostKickMod.dll`, and `MaxPlayersMod.dll` into your `BepInEx/plugins/` folder.
 
 ## Making maps with CustomMapTemplate
 

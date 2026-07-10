@@ -4,3 +4,6 @@
 .vs/
 *.user
 *.suo
+
+# Staged Release-page binaries (uploaded to GitHub Releases directly, not tracked in git)
+/dist/
