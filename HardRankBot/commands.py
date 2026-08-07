@@ -163,6 +163,7 @@ def register_commands(tree: app_commands.CommandTree) -> None:
 
     @tree.command(name="revokehostkey", description="Revoke a member's hosting API key (admin only)")
     @app_commands.describe(member="The member whose hosting key should be revoked")
+    @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
     async def revoke_hostkey(interaction: discord.Interaction, member: discord.Member):
         with get_db() as db:
