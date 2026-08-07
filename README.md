@@ -1,8 +1,8 @@
 # Project Hardline Mods
 
-BepInEx mods for [Project Hardline](https://store.steampowered.com/), built with Harmony.
+BepInEx mods for [Project Hardline](https://store.steampowered.com/), built with Harmony — plus a Discord bot for a free, self-hostable ranked leaderboard.
 
-These are unofficial, fan-made mods and are not affiliated with, endorsed by, or supported by the developer/publisher of Project Hardline.
+These are unofficial, fan-made projects and are not affiliated with, endorsed by, or supported by the developer/publisher of Project Hardline.
 
 ## Mods
 
@@ -81,6 +81,13 @@ Just want to run the mods, not build them? See [INSTALL.md](INSTALL.md) for a fu
 
 `CustomMapTemplate/` isn't built or installed like the three mods above — it's a couple of C# scripts you copy into a separate Unity project (Unity 2022.3.27f1, Built-in Render Pipeline) to build and export `.bundle` map files for CustomMapsMod. See `CustomMapTemplate/README.txt` for full setup steps and `CustomMapTemplate/HOW_TO_MAKE_A_MAP.txt` for details on building geometry, spawn markers, and lighting.
 
+## HardRankBot
+
+A Discord bot that provides a free, self-hosted ranked leaderboard (ELO/MMR, per-map rankings, match history) for communities running the `HardlineLeaderboard` BepInEx plugin — see [HardRankBot/](HardRankBot/). It's a Python project (not a BepInEx mod) with its own setup: see [HardRankBot/README.md](HardRankBot/README.md) for creating the Discord bot, configuring it, and free 24/7 hosting instructions.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This repo has two licenses, one per project type:
+
+- **The BepInEx mods and CustomMapTemplate** (`CustomMapsMod/`, `FFAMod/`, `HostKickMod/`, `MaxPlayersMod/`, `CustomMapTemplate/`) — MIT, see [LICENSE](LICENSE).
+- **HardRankBot** — Apache 2.0, see [HardRankBot/LICENSE](HardRankBot/LICENSE). It's a derivative of Matthias Muhl's ("fleeter") HardRank project; see [HardRankBot/NOTICE](HardRankBot/NOTICE) for exactly what was reused and what changed.

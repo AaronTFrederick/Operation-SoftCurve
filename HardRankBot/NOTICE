@@ -1,0 +1,31 @@
+HardRank Bot
+Copyright 2026 the HardRank Bot contributors
+
+This project is a Discord-bot reimplementation of the ranked-leaderboard
+backend from the "Hardline Leaderboard" / HardRank project:
+
+    Copyright 2026 Matthias Muhl ("fleeter")
+    Licensed under the Apache License, Version 2.0
+
+Specifically adapted from that project (both under the terms of the Apache
+License, Version 2.0):
+
+  - elo.py: the ELO rating algorithm (per-match and per-map rating changes,
+    including the kills-performance bonus) is carried over with no logic
+    changes, only file/import path changes.
+  - db.py: the `players`, `player_map_elo`, and `matches` table schemas are
+    carried over unchanged from the original backend's SQLite schema.
+  - plugin_api.py: the `POST /api/match` request handling (ELO application,
+    disconnected-player handling, match history recording) is adapted from
+    the original backend's `/api/match` endpoint, trimmed of the item/
+    lootbox/challenge-bonus logic that isn't part of this project's scope.
+
+Changes from the original project:
+  - The FastAPI + website backend is replaced with a Discord bot
+    (discord.py) exposing the same data via slash commands instead of a
+    web UI.
+  - Username/password accounts, Steam OpenID login, and personal API keys
+    are replaced with self-service Discord-to-player-name linking (/link),
+    since Discord identity already serves as the auth layer here.
+  - Clans, 1v1 challenges, the coin/lootbox item economy, cosmetics, daily
+    bonuses, and the admin panel are not included in this project.
