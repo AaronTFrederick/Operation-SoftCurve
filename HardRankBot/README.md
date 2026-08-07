@@ -52,7 +52,7 @@ BepInEx plugin (HardlineLeaderboard.dll)
 
 One process, one machine, no separate website or hosting bill.
 
-## Full setup guide (Oracle Cloud — recommended)
+## Full setup guide (Oracle Cloud — recommended) YOU DO NOT HAVE TO DO THIS, THIS IS JUST AN EXPLANATION OF HOW I SET UP THE BOT
 
 This walks through everything end to end: creating the Discord bot, standing up a genuinely-free-forever VM on Oracle Cloud, and keeping the bot running permanently. If you'd rather run it somewhere else, skip to [Alternative hosting](#alternative-hosting) once you've done the Discord bot step.
 
