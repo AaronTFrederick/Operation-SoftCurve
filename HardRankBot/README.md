@@ -29,72 +29,123 @@ BepInEx plugin (HardlineLeaderboard.dll)
 
 One process, one machine, no separate website or hosting bill.
 
-## Setup
+## Full setup guide (Oracle Cloud — recommended)
+
+This walks through everything end to end: creating the Discord bot, standing up a genuinely-free-forever VM on Oracle Cloud, and keeping the bot running permanently. If you'd rather run it somewhere else, skip to [Alternative hosting](#alternative-hosting) once you've done the Discord bot step.
 
 ### 1. Create the Discord bot
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**.
-2. Under **Bot**, click **Reset Token** to get your bot token (this is `DISCORD_TOKEN`).
-3. Under **Bot**, make sure **Public Bot** is off unless you want strangers adding it elsewhere.
-4. Under **OAuth2 → URL Generator**, check scopes `bot` and `applications.commands`, then under bot permissions check at least **Send Messages** and **Use Slash Commands**. Open the generated URL to invite the bot to your server.
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**, name it (e.g. "HardRank").
+2. **Bot** tab → **Reset Token** → copy it somewhere safe. This is your `DISCORD_TOKEN`. You don't need to enable any of the "Privileged Gateway Intents" toggles — this bot only uses slash commands, it never reads message content.
+3. **OAuth2 → URL Generator** → check scopes **bot** and **applications.commands** → under bot permissions check **Send Messages**, **Use Slash Commands**, and **Embed Links**.
+4. Copy the generated URL at the bottom, open it in your browser, pick your server, authorize.
+5. Get your server's ID for `GUILD_ID` (makes slash commands appear instantly instead of up to an hour later): in Discord, **User Settings → Advanced → Developer Mode** (toggle on), then right-click your server's icon → **Copy Server ID**.
 
-### 2. Configure
+### 2. Create the Oracle Cloud VM
 
+1. Sign up at [oracle.com/cloud/free](https://www.oracle.com/cloud/free/) — needs email + phone + a credit card for identity verification (you will not be charged for Always Free resources).
+2. In the Oracle Cloud Console: **☰ menu → Compute → Instances → Create Instance**.
+3. Name it (e.g. `hardrankbot`).
+4. Under **Image and shape**: click **Edit**, change the image to **Canonical Ubuntu** (22.04 or newer), and change the shape to **Ampere → VM.Standard.A1.Flex** — the generous Always Free ARM shape. 1 OCPU / 6GB is overkill for this bot but stays comfortably within the free limits.
+5. Leave networking on its defaults, just confirm **"Assign a public IPv4 address"** is checked.
+6. Under SSH keys, let Oracle **generate a key pair for you** and download the private key file — save it somewhere you'll remember (e.g. `C:\Users\you\.ssh\hardrankbot.pem`).
+7. Click **Create**, wait until the instance shows **Running**, then note its **Public IP** on the instance's detail page.
+
+### 3. Open the port
+
+Oracle blocks inbound ports by default at two separate layers — both need opening:
+
+1. On the instance's detail page, click the linked **Subnet** → **Security Lists** → the default list → **Add Ingress Rules**: Source CIDR `0.0.0.0/0`, IP Protocol `TCP`, Destination Port Range `8000` (or whatever you set `HTTP_PORT` to). Save.
+2. Oracle's Ubuntu images also ship with `iptables` rules that block the port even after that — handled in the next step.
+
+### 4. Connect and set up
+
+From PowerShell (adjust the key path and IP):
 ```
-cd HardRankBot
-cp .env.example .env
+ssh -i "C:\path\to\hardrankbot.pem" ubuntu@<the-public-ip>
 ```
 
-Edit `.env`:
-- `DISCORD_TOKEN` — from step 1.
-- `GUILD_ID` — right-click your Discord server icon → Copy Server ID (enable Developer Mode in Discord settings first if you don't see this option). Optional, but without it slash commands can take up to an hour to appear after each restart.
-- `API_KEY` — make up a long random string. This must match the `ApiKey` setting in the BepInEx plugin's config (`BepInEx/config/com.fleeter.hardlineleaderboard.cfg` on the game side).
+Once connected:
+```bash
+# fix Oracle's default iptables block for our port
+sudo iptables -I INPUT -p tcp --dport 8000 -j ACCEPT
+sudo netfilter-persistent save
 
-### 3. Install dependencies and run
+# install Python + git
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
 
-```
+# grab the code
+git clone https://github.com/AaronTFrederick/Operation-SoftCurve.git
+cd Operation-SoftCurve/HardRankBot
+
+# set up a virtual environment and dependencies
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+
+# configure
+cp .env.example .env
+nano .env
+```
+
+In `nano`, fill in:
+- `DISCORD_TOKEN` — from step 1.2
+- `GUILD_ID` — from step 1.5
+- `API_KEY` — generate one in another terminal tab with `openssl rand -hex 32` and paste the result. This must match the `ApiKey` setting in the BepInEx plugin's config on the game side (`BepInEx/config/com.fleeter.hardlineleaderboard.cfg`).
+- leave `HTTP_HOST=0.0.0.0` and `HTTP_PORT=8000` as they are
+
+Save (`Ctrl+O`, Enter, `Ctrl+X`), then test it:
+```bash
 python bot.py
 ```
+You should see `Logged in as ...` and `Plugin API listening on http://0.0.0.0:8000/api/match`. Try `/leaderboard` in Discord — it should reply "No ranked matches recorded yet." `Ctrl+C` to stop once confirmed working.
 
-You should see `Logged in as ...` and `Plugin API listening on http://0.0.0.0:8000/api/match` in the console.
+### 5. Keep it running permanently
 
-### 4. Point the game plugin at it
+```bash
+sudo tee /etc/systemd/system/hardrankbot.service > /dev/null <<'EOF'
+[Unit]
+Description=HardRank Bot
+After=network.target
 
-In `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` on whichever machine hosts matches, set:
+[Service]
+WorkingDirectory=/home/ubuntu/Operation-SoftCurve/HardRankBot
+ExecStart=/home/ubuntu/Operation-SoftCurve/HardRankBot/venv/bin/python bot.py
+Restart=always
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now hardrankbot
+sudo systemctl status hardrankbot   # should say "active (running)"
 ```
-ApiUrl = http://<your-bot's-address>:8000
-ApiKey = <same value as API_KEY in .env>
+Watch logs anytime with `journalctl -u hardrankbot -f`. It'll now survive reboots and restart automatically if it ever crashes.
+
+### 6. Point the game plugin at it
+
+On whichever machine(s) host matches, edit `BepInEx/config/com.fleeter.hardlineleaderboard.cfg`:
+```
+ApiUrl = http://<your-oracle-public-ip>:8000
+ApiKey = <the same value you put in .env>
+```
+Play a match, then check `/matches` or `/leaderboard` in Discord to confirm it recorded.
+
+### Updating later
+
+```bash
+cd ~/Operation-SoftCurve
+git pull
+sudo systemctl restart hardrankbot
 ```
 
-If the bot is running on the same machine as the test host, `http://localhost:8000` works. For real community use, it needs to be reachable by whoever is hosting a match, which means the bot needs to run somewhere with a stable, reachable address — see hosting below.
+## Alternative hosting
 
-## Hosting (so it runs 24/7 without costing anything)
+**Your own always-on PC or Raspberry Pi.** Zero monthly cost, no cloud signup, but uptime depends on your home internet and power staying up, and you'll need port forwarding on your router plus a free dynamic-DNS service like [DuckDNS](https://www.duckdns.org/) since most home internet doesn't have a static IP. Once reachable, the rest is the same as steps 1 and 4-6 above (skip the Oracle-specific parts).
 
-**Recommended: Oracle Cloud "Always Free" tier.** It's free forever (not a trial), no time limit — a small VM there comfortably runs this bot plus SQLite indefinitely at zero cost. Requires a credit card on file for identity verification, but you won't be charged as long as you stay within the Always Free resource limits, which this project is nowhere near.
-
-1. Sign up at [oracle.com/cloud/free](https://www.oracle.com/cloud/free/) and create an Always Free **Compute** instance (Ampere/ARM shape — the free tier's most generous option; pick the Ubuntu image).
-2. Open the instance's public IP to inbound traffic on your chosen `HTTP_PORT` (default 8000) via the instance's attached security list/network security group in the Oracle console, plus the OS firewall if Ubuntu's `ufw` is enabled (`sudo ufw allow 8000`).
-3. SSH in, install Python 3.11+, clone/copy this folder over, then follow **Setup** above.
-4. Keep it running after you disconnect — either `nohup python bot.py &`, or better, set it up as a systemd service so it restarts automatically on crash/reboot:
-   ```
-   [Unit]
-   Description=HardRank Bot
-   After=network.target
-
-   [Service]
-   WorkingDirectory=/home/ubuntu/HardRankBot
-   ExecStart=/usr/bin/python3 bot.py
-   Restart=always
-   User=ubuntu
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-   Save as `/etc/systemd/system/hardrankbot.service`, then `sudo systemctl enable --now hardrankbot`.
-5. Set `HTTP_HOST=0.0.0.0` in `.env` (already the default) so it accepts connections from outside the VM, and use the VM's public IP as the plugin's `ApiUrl`.
-
-**Alternative: your own always-on PC or Raspberry Pi.** Zero monthly cost, but uptime depends on your home internet and power staying up, and you'll need port forwarding on your router plus a free dynamic-DNS service like [DuckDNS](https://www.duckdns.org/) if you don't have a static IP (most home internet doesn't).
+**Testing locally first.** You can always run `python bot.py` on your current PC to try the Discord side out before committing to any hosting — the plugin just won't be able to reach it from other machines until it's running somewhere with a stable public address.
 
 ## Database
 
