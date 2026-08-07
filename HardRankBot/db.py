@@ -7,8 +7,10 @@ challenges, and the item/lootbox economy are intentionally not included —
 Discord identity replaces the old account system via the discord_links table.
 """
 
+import secrets
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 _db_path: str | None = None
 
@@ -58,6 +60,12 @@ def init(db_path: str) -> None:
                 discord_id  TEXT PRIMARY KEY,
                 player_name TEXT NOT NULL,
                 linked_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS host_keys (
+                discord_id TEXT PRIMARY KEY,
+                api_key    TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL
             );
         """)
 
@@ -123,3 +131,42 @@ def find_player(db: sqlite3.Connection, name: str) -> dict | None:
 def linked_player_name(db: sqlite3.Connection, discord_id: str) -> str | None:
     row = db.execute("SELECT player_name FROM discord_links WHERE discord_id = ?", (discord_id,)).fetchone()
     return row["player_name"] if row else None
+
+
+def get_or_create_host_key(db: sqlite3.Connection, discord_id: str) -> str:
+    """Returns this user's existing personal hosting API key, creating one if needed."""
+    row = db.execute("SELECT api_key FROM host_keys WHERE discord_id = ?", (discord_id,)).fetchone()
+    if row:
+        return row["api_key"]
+    new_key = secrets.token_hex(24)
+    db.execute(
+        "INSERT INTO host_keys (discord_id, api_key, created_at) VALUES (?, ?, ?)",
+        (discord_id, new_key, datetime.now(timezone.utc).isoformat()),
+    )
+    return new_key
+
+
+def regenerate_host_key(db: sqlite3.Connection, discord_id: str) -> str:
+    """Replaces this user's hosting API key with a new one, invalidating the old one."""
+    new_key = secrets.token_hex(24)
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """INSERT INTO host_keys (discord_id, api_key, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(discord_id) DO UPDATE SET api_key = ?, created_at = ?""",
+        (discord_id, new_key, now, new_key, now),
+    )
+    return new_key
+
+
+def revoke_host_key(db: sqlite3.Connection, discord_id: str) -> bool:
+    """Deletes a user's hosting key. Returns False if they didn't have one."""
+    cur = db.execute("DELETE FROM host_keys WHERE discord_id = ?", (discord_id,))
+    return cur.rowcount > 0
+
+
+def verify_host_key(db: sqlite3.Connection, api_key: str) -> str | None:
+    """Returns the owning discord_id if the key is valid, else None."""
+    if not api_key:
+        return None
+    row = db.execute("SELECT discord_id FROM host_keys WHERE api_key = ?", (api_key,)).fetchone()
+    return row["discord_id"] if row else None

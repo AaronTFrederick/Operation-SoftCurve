@@ -5,6 +5,11 @@ Discord identity replaces the old website's username/password accounts:
 players self-link their Discord account to their in-game name with /link,
 then /rank with no argument uses that link. No passwords, no Steam OpenID —
 if that turns out to be a problem (name-squatting) it can be added later.
+
+Hosting match reports is authorized per-person via /hostkey rather than one
+shared secret handed to everyone who might host — see /hostkey's own
+description for why. /revokehostkey lets server admins revoke a specific
+person's key without affecting anyone else's.
 """
 
 from datetime import datetime, timezone
@@ -12,7 +17,11 @@ from datetime import datetime, timezone
 import discord
 from discord import app_commands
 
-from db import get_db, leaderboard_rows, map_leaderboard_rows, player_rank_position, find_player, linked_player_name
+from db import (
+    get_db, leaderboard_rows, map_leaderboard_rows, player_rank_position,
+    find_player, linked_player_name, get_or_create_host_key, regenerate_host_key,
+    revoke_host_key,
+)
 
 REAL_MAPS = ["Compound", "Shipyard", "Fortress", "Lost Island", "Frost"]
 
@@ -135,3 +144,40 @@ def register_commands(tree: app_commands.CommandTree) -> None:
             color=0x6366F1,
         )
         await interaction.response.send_message(embed=embed)
+
+    @tree.command(name="hostkey", description="Get your personal API key for hosting ranked matches")
+    @app_commands.describe(regenerate="Generate a new key, invalidating your current one (use if it leaked)")
+    async def hostkey(interaction: discord.Interaction, regenerate: bool = False):
+        with get_db() as db:
+            key = regenerate_host_key(db, str(interaction.user.id)) if regenerate \
+                else get_or_create_host_key(db, str(interaction.user.id))
+
+        await interaction.response.send_message(
+            f"Your personal hosting API key:\n```\n{key}\n```\n"
+            "Put this in `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` as `ApiKey` on any "
+            "machine where **you** host matches. This is personal to you — don't share it, anyone "
+            "who has it can submit fake match results. If it ever leaks, run "
+            "`/hostkey regenerate:true` to replace it immediately.",
+            ephemeral=True,
+        )
+
+    @tree.command(name="revokehostkey", description="Revoke a member's hosting API key (admin only)")
+    @app_commands.describe(member="The member whose hosting key should be revoked")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def revoke_hostkey(interaction: discord.Interaction, member: discord.Member):
+        with get_db() as db:
+            revoked = revoke_host_key(db, str(member.id))
+
+        if revoked:
+            await interaction.response.send_message(f"Revoked {member.mention}'s hosting key.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"{member.mention} doesn't have a hosting key.", ephemeral=True)
+
+    @revoke_hostkey.error
+    async def revoke_hostkey_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to do that.", ephemeral=True
+            )
+        else:
+            raise error

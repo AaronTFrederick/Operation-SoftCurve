@@ -47,7 +47,7 @@ class HardRankClient(discord.Client):
 
 
 async def run_http_server() -> None:
-    app = create_app(api_key=config.API_KEY)
+    app = create_app()
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.HTTP_HOST, config.HTTP_PORT)

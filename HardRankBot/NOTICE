@@ -24,8 +24,12 @@ Changes from the original project:
   - The FastAPI + website backend is replaced with a Discord bot
     (discord.py) exposing the same data via slash commands instead of a
     web UI.
-  - Username/password accounts, Steam OpenID login, and personal API keys
-    are replaced with self-service Discord-to-player-name linking (/link),
-    since Discord identity already serves as the auth layer here.
+  - Username/password accounts and Steam OpenID login are replaced with
+    self-service Discord-to-player-name linking (/link), since Discord
+    identity already serves as the auth layer here.
+  - Personal API keys are still used for authorizing match reports (as in
+    the original), but obtained via a self-service /hostkey Discord command
+    instead of website registration, and checked directly against a
+    per-Discord-user key instead of a global admin key or website account.
   - Clans, 1v1 challenges, the coin/lootbox item economy, cosmetics, daily
     bonuses, and the admin panel are not included in this project.

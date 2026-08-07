@@ -10,21 +10,44 @@ See [NOTICE](NOTICE) for what this reuses from the original HardRank project (Ap
 - `/rank [player]` — a player's ELO, rank position, W/L, and K/D/A
 - `/link <name>` — link your Discord account to your in-game name (so `/rank` with no argument works)
 - `/matches [player]` — recent ranked match history
+- `/hostkey [regenerate]` — get (or replace) your personal API key for hosting matches — **see below, every host needs this**
+- `/revokehostkey <member>` — admin-only: revoke a specific member's hosting key
 
 Not included (dropped from the original web system to keep this simple — see [NOTICE](NOTICE)): accounts/passwords, Steam login, clans, 1v1 challenges, the coin/lootbox economy, cosmetics, daily bonuses, admin panel.
+
+## For players: getting your hosting API key
+
+**If you host matches** (not just join ones other people host), you need your own personal key so your match reports get accepted:
+
+1. In Discord, run `/hostkey`. It replies privately — only you see it.
+2. Open `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` on the machine you host from, and set:
+   ```
+   ApiUrl = <ask whoever runs the bot for this address>
+   ApiKey = <the key /hostkey just gave you>
+   ```
+3. Restart the game if it was already running.
+
+That's it — matches you host from then on report automatically, no further action needed.
+
+**This key is personal — don't share it.** Anyone who has it can submit fake match results as if they were you, which is exactly why every host gets their own instead of one key for everyone. If you think yours leaked, run `/hostkey regenerate:true` to get a new one instantly; the old one stops working the moment you do.
+
+**If you only ever join matches someone else hosts, you don't need a key at all** — whoever's hosting reports the whole match, including you, automatically.
+
+**Server admins:** if a key gets abused, revoke just that one with `/revokehostkey member:@them` — nobody else's key is affected.
 
 ## How it fits together
 
 ```
 BepInEx plugin (HardlineLeaderboard.dll)
-        |  POST /api/match  (same JSON + X-Api-Key contract as before)
+        |  POST /api/match  (same JSON + X-Api-Key contract as before,
+        |                    but the key is now personal-per-host — see above)
         v
    bot.py process
-     |-- discord.py bot  --> answers /leaderboard, /rank, /link, /matches
-     |-- aiohttp listener --> receives match reports, applies ELO, writes to SQLite
+     |-- discord.py bot  --> answers /leaderboard, /rank, /link, /matches, /hostkey, /revokehostkey
+     |-- aiohttp listener --> verifies the host's personal key, applies ELO, writes to SQLite
         |
         v
-   hardrank.sqlite (players, player_map_elo, matches, discord_links)
+   hardrank.sqlite (players, player_map_elo, matches, discord_links, host_keys)
 ```
 
 One process, one machine, no separate website or hosting bill.
@@ -91,8 +114,9 @@ nano .env
 In `nano`, fill in:
 - `DISCORD_TOKEN` — from step 1.2
 - `GUILD_ID` — from step 1.5
-- `API_KEY` — generate one in another terminal tab with `openssl rand -hex 32` and paste the result. This must match the `ApiKey` setting in the BepInEx plugin's config on the game side (`BepInEx/config/com.fleeter.hardlineleaderboard.cfg`).
 - leave `HTTP_HOST=0.0.0.0` and `HTTP_PORT=8000` as they are
+
+(No API key to set here — each host gets their own automatically via `/hostkey` once the bot's running. See [For players: getting your hosting API key](#for-players-getting-your-hosting-api-key).)
 
 Save (`Ctrl+O`, Enter, `Ctrl+X`), then test it:
 ```bash
@@ -124,13 +148,10 @@ sudo systemctl status hardrankbot   # should say "active (running)"
 ```
 Watch logs anytime with `journalctl -u hardrankbot -f`. It'll now survive reboots and restart automatically if it ever crashes.
 
-### 6. Point the game plugin at it
+### 6. Tell your hosts how to connect
 
-On whichever machine(s) host matches, edit `BepInEx/config/com.fleeter.hardlineleaderboard.cfg`:
-```
-ApiUrl = http://<your-oracle-public-ip>:8000
-ApiKey = <the same value you put in .env>
-```
+Each person who hosts matches (including you, if you host) needs to run `/hostkey` in Discord and set `ApiUrl`/`ApiKey` in their own `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` — see [For players: getting your hosting API key](#for-players-getting-your-hosting-api-key) above. `ApiUrl` is `http://<your-oracle-public-ip>:8000` for everyone; `ApiKey` is personal to each host.
+
 Play a match, then check `/matches` or `/leaderboard` in Discord to confirm it recorded.
 
 ### Updating later

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from elo import calculate_elo_changes, STARTING_ELO
-from db import get_db
+from db import get_db, verify_host_key
 
 MAP_STARTING_ELO = 700
 
@@ -78,8 +78,6 @@ def _apply_map_result(db, name: str, map_name: str, base_elo: int, delta: int,
 
 async def handle_match(request: web.Request) -> web.Response:
     api_key = request.headers.get("X-Api-Key", "")
-    if api_key != request.app["api_key"]:
-        return web.json_response({"detail": "Invalid API key"}, status=401)
 
     try:
         body = await request.json()
@@ -101,6 +99,9 @@ async def handle_match(request: web.Request) -> web.Response:
     player_kills = {p["name"]: p.get("kills", 0) for p in players}
 
     with get_db() as db:
+        if verify_host_key(db, api_key) is None:
+            return web.json_response({"detail": "Invalid API key"}, status=401)
+
         for p in players:
             db.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (p["name"],))
 
@@ -164,8 +165,7 @@ async def handle_match(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "elo_changes": changes})
 
 
-def create_app(api_key: str) -> web.Application:
+def create_app() -> web.Application:
     app = web.Application()
-    app["api_key"] = api_key
     app.router.add_post("/api/match", handle_match)
     return app
