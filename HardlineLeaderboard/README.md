@@ -9,7 +9,7 @@ See [NOTICE](NOTICE) for attribution — this is Matthias Muhl's ("fleeter") ori
 Drop `HardlineLeaderboard.dll` into `BepInEx/plugins/`. Launch the game once to generate `BepInEx/config/com.fleeter.hardlineleaderboard.cfg`, then edit it:
 
 ```
-ApiUrl = <your community's HardRankBot address>
+ApiUrl = <your community's HardRankBot address> for operation softcurve, its http://64.181.214.243:8000
 ApiKey = <your personal key from /hostkey in Discord>
 ```
 
