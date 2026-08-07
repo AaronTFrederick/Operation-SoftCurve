@@ -22,7 +22,7 @@ Not included (dropped from the original web system to keep this simple — see [
 1. In Discord, run `/hostkey`. It replies privately — only you see it.
 2. Open `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` on the machine you host from, and set:
    ```
-   ApiUrl = <ask whoever runs the bot for this address>
+   ApiUrl = <ask whoever runs the bot for this address> for operation softcurve, its http://64.181.214.243:8000
    ApiKey = <the key /hostkey just gave you>
    ```
 3. Restart the game if it was already running.
