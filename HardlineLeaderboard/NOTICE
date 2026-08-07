@@ -1,0 +1,22 @@
+Hardline Leaderboard (plugin)
+
+    Copyright 2026 Matthias Muhl ("fleeter")
+    Licensed under the Apache License, Version 2.0
+
+This is the BepInEx client plugin from the "Hardline Leaderboard" / HardRank
+project, which reports match results to a leaderboard backend. It's used
+here to report to HardRankBot (see the sibling HardRankBot/ project) instead
+of the original hosted HardRank site.
+
+Changes from the original:
+  - The `ApiKey` config description now points players at the /hostkey
+    Discord command (HardRankBot's self-service per-host key system)
+    instead of a website profile page, since there is no website here.
+  - The .csproj's game-DLL reference paths were rewritten for a Windows
+    Steam install (`Project Hardline_Data\Managed\...`) instead of the
+    original's Mac `.app` bundle paths
+    (`Project Hardline.app/Contents/Resources/Data/Managed`). Building on
+    Mac needs those paths restored — see HardlineLeaderboard.csproj.
+
+No other logic was changed — match reporting, disconnect tracking, and the
+JSON payload format are all unchanged from the original.

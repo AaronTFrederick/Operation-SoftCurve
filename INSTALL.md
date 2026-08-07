@@ -102,6 +102,10 @@ No keybinds or setup — it's automatic. As soon as it's installed, lobbies can 
 2. Drop any `.bundle` map file into that folder (see the [CustomMapTemplate](CustomMapTemplate/) folder in this repo if you want to make your own).
 3. Host a lobby — custom maps show up at the bottom of the map dropdown with a `[Custom]` prefix.
 
+### HardlineLeaderboard — ranked tracking (optional)
+
+Separate download, not required for the four mods above. If your community runs [HardRankBot](HardRankBot/), install `HardlineLeaderboard.dll` too and see [HardRankBot's README](HardRankBot/README.md#for-players-getting-your-hosting-api-key) for getting your personal hosting key — only needed if you **host** matches, not if you just join them.
+
 ---
 
 ## Troubleshooting

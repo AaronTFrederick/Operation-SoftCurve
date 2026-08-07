@@ -10,6 +10,7 @@ These are unofficial, fan-made projects and are not affiliated with, endorsed by
 - **FFAMod** — Adds a Free-For-All mode and a Gun Game mode on top of the game's normal team play, including its own spawn selection, weapon progression, and score tracking.
 - **HostKickMod** — Adds a host-only menu to disconnect players, plus a configurable custom crosshair overlay for everyone.
 - **MaxPlayersMod** — Removes the game's hardcoded 5-player lobby cap and creates the Steam lobby at Steam's own maximum (250) instead.
+- **HardlineLeaderboard** — Reports match results to [HardRankBot](HardRankBot/) so they count toward the ranked leaderboard. Third-party plugin (Apache 2.0, not MIT like the others above) — see [HardlineLeaderboard/](HardlineLeaderboard/).
 - **CustomMapTemplate** — Not a mod; a set of Unity Editor scripts (exporter + spawn/lighting marker components) plus two beginner-friendly guides for building and exporting `.bundle` map files that work with CustomMapsMod.
 
 ## Requirements
@@ -73,9 +74,11 @@ Order between FFAMod, CustomMapsMod, and MaxPlayersMod doesn't matter — only H
 
 Each project has a post-build step (`CopyToPlugins` in the `.csproj`) that automatically copies the built DLL into `BepInEx\plugins\`, so make sure that folder exists. The raw build output also lands in each project's own `bin\Debug\net472\` folder.
 
+`HardlineLeaderboard/` builds differently (different target framework, different references, no `CopyToPlugins` step) since it's a separate third-party project rather than one of the four mods above — see [HardlineLeaderboard/README.md](HardlineLeaderboard/README.md).
+
 ## Installing (pre-built)
 
-Just want to run the mods, not build them? See [INSTALL.md](INSTALL.md) for a full Windows + Mac walkthrough, including installing BepInEx itself. Short version: drop the built `CustomMapsMod.dll`, `FFAMod.dll`, `HostKickMod.dll`, and `MaxPlayersMod.dll` into your `BepInEx/plugins/` folder.
+Just want to run the mods, not build them? See [INSTALL.md](INSTALL.md) for a full Windows + Mac walkthrough, including installing BepInEx itself. Short version: drop the built `CustomMapsMod.dll`, `FFAMod.dll`, `HostKickMod.dll`, and `MaxPlayersMod.dll` into your `BepInEx/plugins/` folder. Add `HardlineLeaderboard.dll` too if you want ranked tracking — see [HardlineLeaderboard/README.md](HardlineLeaderboard/README.md).
 
 ## Making maps with CustomMapTemplate
 
@@ -83,11 +86,11 @@ Just want to run the mods, not build them? See [INSTALL.md](INSTALL.md) for a fu
 
 ## HardRankBot
 
-A Discord bot that provides a free, self-hosted ranked leaderboard (ELO/MMR, per-map rankings, match history) for communities running the `HardlineLeaderboard` BepInEx plugin — see [HardRankBot/](HardRankBot/). It's a Python project (not a BepInEx mod) with its own setup: see [HardRankBot/README.md](HardRankBot/README.md) for creating the Discord bot, configuring it, and free 24/7 hosting instructions.
+A Discord bot that provides a free, self-hosted ranked leaderboard (ELO/MMR, per-map rankings, match history) for communities running the [HardlineLeaderboard](HardlineLeaderboard/) BepInEx plugin — see [HardRankBot/](HardRankBot/). It's a Python project (not a BepInEx mod) with its own setup: see [HardRankBot/README.md](HardRankBot/README.md) for creating the Discord bot, configuring it, and free 24/7 hosting instructions.
 
 ## License
 
 This repo has two licenses, one per project type:
 
 - **The BepInEx mods and CustomMapTemplate** (`CustomMapsMod/`, `FFAMod/`, `HostKickMod/`, `MaxPlayersMod/`, `CustomMapTemplate/`) — MIT, see [LICENSE](LICENSE).
-- **HardRankBot** — Apache 2.0, see [HardRankBot/LICENSE](HardRankBot/LICENSE). It's a derivative of Matthias Muhl's ("fleeter") HardRank project; see [HardRankBot/NOTICE](HardRankBot/NOTICE) for exactly what was reused and what changed.
+- **HardRankBot and HardlineLeaderboard** — Apache 2.0, both originating from Matthias Muhl's ("fleeter") HardRank project. HardRankBot is a derivative (a Discord-bot reimplementation of the backend); HardlineLeaderboard is his original plugin with minimal changes. See [HardRankBot/LICENSE](HardRankBot/LICENSE)/[NOTICE](HardRankBot/NOTICE) and [HardlineLeaderboard/LICENSE](HardlineLeaderboard/LICENSE)/[NOTICE](HardlineLeaderboard/NOTICE) for exactly what was reused and what changed in each.
