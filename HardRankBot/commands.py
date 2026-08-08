@@ -20,7 +20,7 @@ from discord import app_commands
 from db import (
     get_db, leaderboard_rows, map_leaderboard_rows, player_rank_position,
     find_player, linked_player_name, get_or_create_host_key, regenerate_host_key,
-    revoke_host_key,
+    revoke_host_key, recent_matches_with_reporter, undo_matches_by_reporter,
 )
 
 REAL_MAPS = ["Compound", "Shipyard", "Fortress", "Lost Island", "Frost"]
@@ -176,6 +176,69 @@ def register_commands(tree: app_commands.CommandTree) -> None:
 
     @revoke_hostkey.error
     async def revoke_hostkey_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to do that.", ephemeral=True
+            )
+        else:
+            raise error
+
+    @tree.command(name="recentreports", description="See who's been reporting recent matches (admin only)")
+    @app_commands.describe(limit="How many recent matches to show (default 20)")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def recentreports(interaction: discord.Interaction, limit: int = 20):
+        with get_db() as db:
+            rows = recent_matches_with_reporter(db, limit)
+
+        if not rows:
+            await interaction.response.send_message("No matches recorded yet.", ephemeral=True)
+            return
+
+        lines = []
+        for r in rows:
+            reporter = f"<@{r['reported_by']}>" if r["reported_by"] else "*unknown (reported before tracking existed)*"
+            played_at = r["played_at"][:16].replace("T", " ")
+            lines.append(f"#{r['id']} — **{r['map']}** ({played_at} UTC) — reported by {reporter}")
+
+        embed = discord.Embed(title="Recent Match Reports", description="\n".join(lines), color=0x6366F1)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @recentreports.error
+    async def recentreports_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to do that.", ephemeral=True
+            )
+        else:
+            raise error
+
+    @tree.command(
+        name="banhost",
+        description="Revoke a member's hosting key AND undo every match they've reported (admin only)",
+    )
+    @app_commands.describe(member="The member to ban from hosting and undo all reported matches from")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def banhost(interaction: discord.Interaction, member: discord.Member):
+        with get_db() as db:
+            undone_count, affected_players = undo_matches_by_reporter(db, str(member.id))
+            revoked = revoke_host_key(db, str(member.id))
+
+        key_msg = "Revoked their hosting key." if revoked else "They had no hosting key to revoke."
+        if undone_count == 0:
+            match_msg = "No matches were on record from them."
+        else:
+            players_list = ", ".join(sorted(affected_players)) or "none"
+            match_msg = f"Undid {undone_count} match(es) they reported, affecting: {players_list}."
+
+        await interaction.response.send_message(
+            f"**{member.mention}**: {key_msg} {match_msg}",
+            ephemeral=True,
+        )
+
+    @banhost.error
+    async def banhost_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message(
                 "You need the **Manage Server** permission to do that.", ephemeral=True

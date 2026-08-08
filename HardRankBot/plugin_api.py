@@ -99,7 +99,8 @@ async def handle_match(request: web.Request) -> web.Response:
     player_kills = {p["name"]: p.get("kills", 0) for p in players}
 
     with get_db() as db:
-        if verify_host_key(db, api_key) is None:
+        host_discord_id = verify_host_key(db, api_key)
+        if host_discord_id is None:
             return web.json_response({"detail": "Invalid API key"}, status=401)
 
         for p in players:
@@ -147,6 +148,7 @@ async def handle_match(request: web.Request) -> web.Response:
             map_delta = map_changes[name]
             if disconnected:
                 map_delta = min(map_delta, -abs(map_delta))
+                map_changes[name] = map_delta
             _apply_map_result(
                 db, name, map_name, map_elos[name], map_delta,
                 p.get("team") == winning_team, disconnected,
@@ -155,11 +157,12 @@ async def handle_match(request: web.Request) -> web.Response:
 
         db.execute(
             """INSERT INTO matches
-                   (map, match_type, winning_team, team1_wins, team2_wins, players, elo_changes, played_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (map, match_type, winning_team, team1_wins, team2_wins, players,
+                    elo_changes, map_elo_changes, reported_by, played_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (map_name, match_type, winning_team, team1_wins, team2_wins,
-             json.dumps(players), json.dumps(changes),
-             datetime.now(timezone.utc).isoformat()),
+             json.dumps(players), json.dumps(changes), json.dumps(map_changes),
+             host_discord_id, datetime.now(timezone.utc).isoformat()),
         )
 
     return web.json_response({"status": "ok", "elo_changes": changes})

@@ -12,6 +12,8 @@ See [NOTICE](NOTICE) for what this reuses from the original HardRank project (Ap
 - `/matches [player]` — recent ranked match history
 - `/hostkey [regenerate]` — get (or replace) your personal API key for hosting matches — **see below, every host needs this**
 - `/revokehostkey <member>` — admin-only: revoke a specific member's hosting key
+- `/recentreports [limit]` — admin-only: see who (by Discord mention) reported each recent match — your first stop for spotting abuse
+- `/banhost <member>` — admin-only: revoke a member's hosting key **and** undo every match they've ever reported, in one action
 
 Not included (dropped from the original web system to keep this simple — see [NOTICE](NOTICE)): accounts/passwords, Steam login, clans, 1v1 challenges, the coin/lootbox economy, cosmetics, daily bonuses, admin panel.
 
@@ -22,7 +24,7 @@ Not included (dropped from the original web system to keep this simple — see [
 1. In Discord, run `/hostkey`. It replies privately — only you see it.
 2. Open `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` on the machine you host from, and set:
    ```
-   ApiUrl = <ask whoever runs the bot for this address> for operation softcurve, its http://64.181.214.243:8000
+   ApiUrl = <ask whoever runs the bot for this address>
    ApiKey = <the key /hostkey just gave you>
    ```
 3. Restart the game if it was already running.
@@ -34,6 +36,16 @@ That's it — matches you host from then on report automatically, no further act
 **If you only ever join matches someone else hosts, you don't need a key at all** — whoever's hosting reports the whole match, including you, automatically.
 
 **Server admins:** if a key gets abused, revoke just that one with `/revokehostkey member:@them` — nobody else's key is affected.
+
+## Dealing with abuse
+
+Every match report is tagged with who submitted it (`reported_by`, tied to their Discord ID) from the moment this feature was added — matches recorded before that show as "unknown" and can't be traced or undone, only future ones can.
+
+1. Run `/recentreports` to see who's been submitting matches. A single Discord user with an unusual burst of reports is your signal.
+2. Run `/banhost member:@them` — this revokes their hosting key **and** undoes every match they've ever reported (reverses the exact ELO/win/loss/kill/death/assist changes those matches caused, then deletes them), in one action.
+3. That's it — they can't submit further reports (key's gone), and the leaderboard is back to how it looked before their matches existed.
+
+Note on precision: global ELO/stats reverse exactly. Per-map ELO can drift very slightly in edge cases (if the original write happened to hit the 100-point floor), which isn't reversible after the fact — fine for cleaning up abuse, not a general-purpose "undo" for legitimate mistakes.
 
 ## How it fits together
 
@@ -52,7 +64,7 @@ BepInEx plugin (HardlineLeaderboard.dll)
 
 One process, one machine, no separate website or hosting bill.
 
-## Full setup guide (Oracle Cloud — recommended) YOU DO NOT HAVE TO DO THIS, THIS IS JUST AN EXPLANATION OF HOW I SET UP THE BOT
+## Full setup guide (Oracle Cloud — recommended)
 
 This walks through everything end to end: creating the Discord bot, standing up a genuinely-free-forever VM on Oracle Cloud, and keeping the bot running permanently. If you'd rather run it somewhere else, skip to [Alternative hosting](#alternative-hosting) once you've done the Discord bot step.
 

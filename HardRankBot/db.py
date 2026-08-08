@@ -7,6 +7,7 @@ challenges, and the item/lootbox economy are intentionally not included —
 Discord identity replaces the old account system via the discord_links table.
 """
 
+import json
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -45,15 +46,17 @@ def init(db_path: str) -> None:
             );
 
             CREATE TABLE IF NOT EXISTS matches (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                map          TEXT    NOT NULL,
-                match_type   TEXT    NOT NULL DEFAULT 'Round',
-                winning_team INTEGER NOT NULL,
-                team1_wins   INTEGER NOT NULL,
-                team2_wins   INTEGER NOT NULL,
-                players      TEXT    NOT NULL,
-                elo_changes  TEXT    NOT NULL,
-                played_at    TEXT    NOT NULL
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                map             TEXT    NOT NULL,
+                match_type      TEXT    NOT NULL DEFAULT 'Round',
+                winning_team    INTEGER NOT NULL,
+                team1_wins      INTEGER NOT NULL,
+                team2_wins      INTEGER NOT NULL,
+                players         TEXT    NOT NULL,
+                elo_changes     TEXT    NOT NULL,
+                map_elo_changes TEXT,
+                reported_by     TEXT,
+                played_at       TEXT    NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS discord_links (
@@ -68,6 +71,14 @@ def init(db_path: str) -> None:
                 created_at TEXT NOT NULL
             );
         """)
+
+        # Migration for databases created before reported_by/map_elo_changes existed --
+        # CREATE TABLE IF NOT EXISTS above won't add columns to an already-existing table.
+        match_cols = {row["name"] for row in db.execute("PRAGMA table_info(matches)")}
+        if "reported_by" not in match_cols:
+            db.execute("ALTER TABLE matches ADD COLUMN reported_by TEXT")
+        if "map_elo_changes" not in match_cols:
+            db.execute("ALTER TABLE matches ADD COLUMN map_elo_changes TEXT")
 
 
 @contextmanager
@@ -170,3 +181,100 @@ def verify_host_key(db: sqlite3.Connection, api_key: str) -> str | None:
         return None
     row = db.execute("SELECT discord_id FROM host_keys WHERE api_key = ?", (api_key,)).fetchone()
     return row["discord_id"] if row else None
+
+
+def recent_matches_with_reporter(db: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    """For admin triage: who (by discord_id) reported each recent match.
+    reported_by is NULL for matches recorded before this tracking existed."""
+    rows = db.execute(
+        "SELECT id, map, winning_team, reported_by, played_at FROM matches ORDER BY played_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def matches_by_reporter(db: sqlite3.Connection, discord_id: str) -> list[dict]:
+    rows = db.execute(
+        "SELECT * FROM matches WHERE reported_by = ? ORDER BY played_at DESC", (discord_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def undo_match(db: sqlite3.Connection, match_id: int) -> dict | None:
+    """Reverses a match's effect on players/player_map_elo and deletes it.
+    Returns the deleted match's row (as a dict), or None if it didn't exist.
+
+    Note: global ELO/stats reverse exactly (elo_changes is recorded with no
+    floor clamp on write). Per-map ELO can drift slightly if the original
+    write was clamped at the 100 floor, since that floor isn't reversible
+    after the fact -- acceptable imprecision for cleaning up bad matches,
+    not for exact bookkeeping.
+    """
+    row = db.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
+    if row is None:
+        return None
+    match = dict(row)
+    players = json.loads(match["players"])
+    elo_changes = json.loads(match["elo_changes"])
+    map_elo_changes = json.loads(match["map_elo_changes"]) if match["map_elo_changes"] else None
+    winning_team = match["winning_team"]
+    map_name = match["map"]
+
+    for p in players:
+        name = p["name"]
+        delta = elo_changes.get(name, 0)
+        won = p.get("team") == winning_team
+        disconnected = p.get("disconnected", False)
+        kills, deaths, assists = p.get("kills", 0), p.get("deaths", 0), p.get("assists", 0)
+
+        if disconnected:
+            db.execute(
+                """UPDATE players SET
+                       elo = elo - :delta, losses = losses - 1,
+                       kills = kills - :k, deaths = deaths - :d, assists = assists - :a
+                   WHERE name = :name""",
+                {"delta": delta, "k": kills, "d": deaths, "a": assists, "name": name},
+            )
+        else:
+            db.execute(
+                """UPDATE players SET
+                       elo = elo - :delta, wins = wins - :won, losses = losses - :lost,
+                       kills = kills - :k, deaths = deaths - :d, assists = assists - :a
+                   WHERE name = :name""",
+                {"delta": delta, "won": 1 if won else 0, "lost": 0 if won else 1,
+                 "k": kills, "d": deaths, "a": assists, "name": name},
+            )
+
+        if map_elo_changes is not None:
+            map_delta = map_elo_changes.get(name, 0)
+            if disconnected:
+                db.execute(
+                    """UPDATE player_map_elo SET
+                           elo = elo - :delta, losses = losses - 1,
+                           kills = kills - :k, deaths = deaths - :d, assists = assists - :a
+                       WHERE name = :name AND map = :map""",
+                    {"delta": map_delta, "k": kills, "d": deaths, "a": assists, "name": name, "map": map_name},
+                )
+            else:
+                db.execute(
+                    """UPDATE player_map_elo SET
+                           elo = elo - :delta, wins = wins - :won, losses = losses - :lost,
+                           kills = kills - :k, deaths = deaths - :d, assists = assists - :a
+                       WHERE name = :name AND map = :map""",
+                    {"delta": map_delta, "won": 1 if won else 0, "lost": 0 if won else 1,
+                     "k": kills, "d": deaths, "a": assists, "name": name, "map": map_name},
+                )
+
+    db.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+    return match
+
+
+def undo_matches_by_reporter(db: sqlite3.Connection, discord_id: str) -> tuple[int, set[str]]:
+    """Undoes every match reported by this discord_id. Returns (count_undone, affected_player_names)."""
+    matches = matches_by_reporter(db, discord_id)
+    affected: set[str] = set()
+    for m in matches:
+        for p in json.loads(m["players"]):
+            affected.add(p["name"])
+        undo_match(db, m["id"])
+    return len(matches), affected
