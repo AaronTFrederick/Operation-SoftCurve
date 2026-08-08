@@ -68,9 +68,15 @@ def init(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS host_keys (
                 discord_id TEXT PRIMARY KEY,
                 api_key    TEXT UNIQUE NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                suspended  INTEGER NOT NULL DEFAULT 0
             );
         """)
+
+        # Migration for databases created before suspended existed.
+        host_key_cols = {row["name"] for row in db.execute("PRAGMA table_info(host_keys)")}
+        if "suspended" not in host_key_cols:
+            db.execute("ALTER TABLE host_keys ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0")
 
         # Migration for databases created before reported_by/map_elo_changes existed --
         # CREATE TABLE IF NOT EXISTS above won't add columns to an already-existing table.
@@ -158,15 +164,25 @@ def get_or_create_host_key(db: sqlite3.Connection, discord_id: str) -> str:
 
 
 def regenerate_host_key(db: sqlite3.Connection, discord_id: str) -> str:
-    """Replaces this user's hosting API key with a new one, invalidating the old one."""
+    """Replaces this user's hosting API key with a new one, invalidating the old one.
+    Also clears any auto-suspension -- regenerating is a deliberate fresh start."""
     new_key = secrets.token_hex(24)
     now = datetime.now(timezone.utc).isoformat()
     db.execute(
-        """INSERT INTO host_keys (discord_id, api_key, created_at) VALUES (?, ?, ?)
-           ON CONFLICT(discord_id) DO UPDATE SET api_key = ?, created_at = ?""",
+        """INSERT INTO host_keys (discord_id, api_key, created_at, suspended) VALUES (?, ?, ?, 0)
+           ON CONFLICT(discord_id) DO UPDATE SET api_key = ?, created_at = ?, suspended = 0""",
         (discord_id, new_key, now, new_key, now),
     )
     return new_key
+
+
+def is_host_suspended(db: sqlite3.Connection, discord_id: str) -> bool:
+    row = db.execute("SELECT suspended FROM host_keys WHERE discord_id = ?", (discord_id,)).fetchone()
+    return bool(row and row["suspended"])
+
+
+def suspend_host_key(db: sqlite3.Connection, discord_id: str) -> None:
+    db.execute("UPDATE host_keys SET suspended = 1 WHERE discord_id = ?", (discord_id,))
 
 
 def revoke_host_key(db: sqlite3.Connection, discord_id: str) -> bool:
@@ -184,12 +200,17 @@ def verify_host_key(db: sqlite3.Connection, api_key: str) -> str | None:
 
 
 def recent_matches_with_reporter(db: sqlite3.Connection, limit: int = 20) -> list[dict]:
-    """For admin triage: who (by discord_id) reported each recent match.
-    reported_by is NULL for matches recorded before this tracking existed."""
-    rows = db.execute(
-        "SELECT id, map, winning_team, reported_by, played_at FROM matches ORDER BY played_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+    """For admin triage: who (by discord_id) reported each recent match, and whether
+    that reporter's key is currently suspended. reported_by is NULL for matches
+    recorded before this tracking existed."""
+    rows = db.execute("""
+        SELECT m.id, m.map, m.winning_team, m.reported_by, m.played_at,
+               COALESCE(h.suspended, 0) AS reporter_suspended
+        FROM matches m
+        LEFT JOIN host_keys h ON h.discord_id = m.reported_by
+        ORDER BY m.played_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 

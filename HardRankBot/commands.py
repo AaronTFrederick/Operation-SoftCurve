@@ -21,6 +21,7 @@ from db import (
     get_db, leaderboard_rows, map_leaderboard_rows, player_rank_position,
     find_player, linked_player_name, get_or_create_host_key, regenerate_host_key,
     revoke_host_key, recent_matches_with_reporter, undo_matches_by_reporter,
+    is_host_suspended,
 )
 
 REAL_MAPS = ["Compound", "Shipyard", "Fortress", "Lost Island", "Frost"]
@@ -146,14 +147,25 @@ def register_commands(tree: app_commands.CommandTree) -> None:
         await interaction.response.send_message(embed=embed)
 
     @tree.command(name="hostkey", description="Get your personal API key for hosting ranked matches")
-    @app_commands.describe(regenerate="Generate a new key, invalidating your current one (use if it leaked)")
+    @app_commands.describe(regenerate="Generate a new key, invalidating your current one (use if it leaked, or to lift a suspension)")
     async def hostkey(interaction: discord.Interaction, regenerate: bool = False):
+        discord_id = str(interaction.user.id)
         with get_db() as db:
-            key = regenerate_host_key(db, str(interaction.user.id)) if regenerate \
-                else get_or_create_host_key(db, str(interaction.user.id))
+            key = regenerate_host_key(db, discord_id) if regenerate else get_or_create_host_key(db, discord_id)
+            suspended = is_host_suspended(db, discord_id)
 
+        if suspended and not regenerate:
+            await interaction.response.send_message(
+                "Your hosting key is currently **suspended** — it submitted matches too quickly and "
+                "was automatically flagged for review. Contact a server admin, or run "
+                "`/hostkey regenerate:true` for a fresh, unsuspended key if you believe this was a mistake.",
+                ephemeral=True,
+            )
+            return
+
+        note = " (this replaces your previous key and lifts any suspension)" if regenerate else ""
         await interaction.response.send_message(
-            f"Your personal hosting API key:\n```\n{key}\n```\n"
+            f"Your personal hosting API key{note}:\n```\n{key}\n```\n"
             "Put this in `BepInEx/config/com.fleeter.hardlineleaderboard.cfg` as `ApiKey` on any "
             "machine where **you** host matches. This is personal to you — don't share it, anyone "
             "who has it can submit fake match results. If it ever leaks, run "
@@ -197,7 +209,12 @@ def register_commands(tree: app_commands.CommandTree) -> None:
 
         lines = []
         for r in rows:
-            reporter = f"<@{r['reported_by']}>" if r["reported_by"] else "*unknown (reported before tracking existed)*"
+            if r["reported_by"]:
+                reporter = f"<@{r['reported_by']}>"
+                if r["reporter_suspended"]:
+                    reporter += " ⚠️ **suspended**"
+            else:
+                reporter = "*unknown (reported before tracking existed)*"
             played_at = r["played_at"][:16].replace("T", " ")
             lines.append(f"#{r['id']} — **{r['map']}** ({played_at} UTC) — reported by {reporter}")
 

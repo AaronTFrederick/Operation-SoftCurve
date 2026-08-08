@@ -7,14 +7,44 @@ address without any changes: same JSON body shape, same `X-Api-Key` header.
 """
 
 import json
+import logging
+import time
 from datetime import datetime, timezone
 
 from aiohttp import web
 
 from elo import calculate_elo_changes, STARTING_ELO
-from db import get_db, verify_host_key
+from db import get_db, verify_host_key, is_host_suspended, suspend_host_key
 
 MAP_STARTING_ELO = 700
+
+log = logging.getLogger("hardrank.plugin_api")
+
+# ---------------------------------------------------------------------------
+# Burst-abuse detection: a real match takes several minutes to play out, so
+# the same host submitting many matches in a short window is a strong signal
+# of fabricated/spammed reports rather than a coincidence. On detection, the
+# triggering submission is rejected (never recorded) and the key is
+# suspended -- an admin decides from there via /recentreports and /banhost
+# whether to also undo the earlier matches in the burst.
+#
+# In-memory only (resets on restart) -- acceptable since a resumed abuse
+# pattern re-triggers within a couple of submissions either way.
+# ---------------------------------------------------------------------------
+ABUSE_WINDOW_SECONDS = 120
+ABUSE_MAX_IN_WINDOW = 3  # a 4th submission within the window triggers suspension
+
+_recent_submissions: dict[str, list[float]] = {}
+
+
+def _is_submission_burst(discord_id: str) -> bool:
+    now = time.time()
+    timestamps = _recent_submissions.setdefault(discord_id, [])
+    timestamps.append(now)
+    cutoff = now - ABUSE_WINDOW_SECONDS
+    while timestamps and timestamps[0] < cutoff:
+        timestamps.pop(0)
+    return len(timestamps) > ABUSE_MAX_IN_WINDOW
 
 
 def _apply_result(db, name: str, delta: int, won: bool, disconnected: bool,
@@ -102,6 +132,23 @@ async def handle_match(request: web.Request) -> web.Response:
         host_discord_id = verify_host_key(db, api_key)
         if host_discord_id is None:
             return web.json_response({"detail": "Invalid API key"}, status=401)
+
+        if is_host_suspended(db, host_discord_id):
+            return web.json_response(
+                {"detail": "This hosting key is suspended. Contact a server admin."}, status=403
+            )
+
+        if _is_submission_burst(host_discord_id):
+            suspend_host_key(db, host_discord_id)
+            log.warning(
+                "Auto-suspended host key for discord_id=%s: more than %d matches within %ds",
+                host_discord_id, ABUSE_MAX_IN_WINDOW, ABUSE_WINDOW_SECONDS,
+            )
+            return web.json_response(
+                {"detail": "Too many matches submitted too quickly -- this hosting key has been "
+                            "automatically suspended pending admin review."},
+                status=403,
+            )
 
         for p in players:
             db.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (p["name"],))

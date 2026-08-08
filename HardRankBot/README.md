@@ -41,7 +41,9 @@ That's it — matches you host from then on report automatically, no further act
 
 Every match report is tagged with who submitted it (`reported_by`, tied to their Discord ID) from the moment this feature was added — matches recorded before that show as "unknown" and can't be traced or undone, only future ones can.
 
-1. Run `/recentreports` to see who's been submitting matches. A single Discord user with an unusual burst of reports is your signal.
+**Automatic detection:** a real match takes several minutes to play out, so if the same hosting key submits more than 3 matches within a 2-minute window, the bot automatically rejects that submission (it's never recorded) and suspends the key before any more damage happens. The earlier matches in the burst are *not* automatically undone — that's still a judgment call for an admin (see below), since an automated system undoing match history without any human review felt like the wrong default. A player whose key gets auto-suspended sees this via `/hostkey`, and can lift it themselves with `/hostkey regenerate:true` if it was a false positive (e.g. a network retry), or an admin can do the same via `/revokehostkey` + telling them to run `/hostkey` again.
+
+1. Run `/recentreports` to see who's been submitting matches — currently-suspended reporters are flagged with ⚠️. A single Discord user with an unusual burst of reports is your signal even without the automatic flag.
 2. Run `/banhost member:@them` — this revokes their hosting key **and** undoes every match they've ever reported (reverses the exact ELO/win/loss/kill/death/assist changes those matches caused, then deletes them), in one action.
 3. That's it — they can't submit further reports (key's gone), and the leaderboard is back to how it looked before their matches existed.
 
